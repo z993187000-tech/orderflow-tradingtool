@@ -34,3 +34,10 @@ class MarkPriceEvent:
     index_price: float
     funding_rate: float
     next_funding_time: int
+
+
+@dataclass(frozen=True)
+class SpotPriceEvent:
+    timestamp: int
+    symbol: str
+    price: float

@@ -91,11 +91,13 @@ Phone/LAN: http://你的电脑局域网IP:8000
 
 手机和电脑必须在同一个 Wi-Fi/局域网下。若手机打不开，通常需要允许 Windows 防火墙放行 Python，或确认路由器没有开启 AP/client isolation。
 
-实时模式使用 Binance USDⓈ-M Futures WebSocket，并按 Binance 路由拆成两条连接：
+实时模式同时接入 Binance Spot 和 USDⓈ-M Futures WebSocket。Web 顶部价格用于对齐币安现货 `BTC/USDT`、`ETH/USDT` 最新价，订单流仍使用永续合约成交：
 
 - Market Endpoint：`wss://fstream.binance.com/market/stream?streams=<symbol>@aggTrade/<symbol>@markPrice@1s`
 - Public Endpoint：`wss://fstream.binance.com/public/stream?streams=<symbol>@bookTicker`
-- Aggregate Trade Stream：`<symbol>@aggTrade`，用于顶部 Last / 最新成交价、成交明细、Delta、成交量分布。
+- Spot Endpoint：`wss://stream.binance.com:9443/stream?streams=<symbol>@trade`
+- Spot Trade Stream：`<symbol>@trade`，用于顶部 Spot Last / 现货最新价。
+- Aggregate Trade Stream：`<symbol>@aggTrade`，用于永续合约成交明细、Delta、成交量分布。
 - Mark Price Stream：`<symbol>@markPrice@1s`，用于显示标记价、指数价和资金费率。
 - Book Ticker Stream：`<symbol>@bookTicker`，用于显示 bid/ask 和盘口中间价。
 - 官方文档：https://developers.binance.com/docs/derivatives/usds-margined-futures/websocket-market-streams
@@ -108,7 +110,7 @@ http://127.0.0.1:8000
 
 当前 Web Dashboard 展示：
 
-- Last / 最新价：优先显示 Binance `aggTrade` 最新成交价；下方同时显示 Mark 标记价和 Mid 盘口中间价。
+- Spot/Index Last / 现货/指数最新价：优先显示 Binance Spot `trade` 最新成交价，用来对齐币安现货 BTC/USDT、ETH/USDT 页面；如果现货流不可用，则回退显示 USDⓈ-M Futures 的 `index_price`。下方同时显示 Perp 永续成交价、Mark 标记价、Index 指数价和 Mid 盘口中间价。
 - Cum Delta / 累计Delta：主动买入成交量减主动卖出成交量的累计值。
 - Signals / 信号数：策略生成的交易信号数量。
 - Orders / 订单数：通过风控后的模拟订单数量。
@@ -125,7 +127,8 @@ http://127.0.0.1:8000
 实时刷新与 profile 计算规则：
 
 - Web 页面每 2 秒自动请求一次 `/api/orderflow`，并使用 `cache=no-store` 避免浏览器缓存旧价格。
-- 顶部 Last / 最新价优先使用 Binance `aggTrade` 最新成交价，用来对齐 Binance Futures 页面里的 Last Price；如果成交流还没收到，临时回退为 `bookTicker` bid/ask 中间价。
+- 顶部 Spot/Index Last / 现货/指数最新价按 `Spot trade -> Index price -> Perp aggTrade -> bookTicker mid` 的优先级显示，避免现货 WebSocket 被地区限制时继续显示偏低的永续成交价。
+- Live 模式默认同时启动 BTCUSDT 和 ETHUSDT 数据源，页面下拉框切换时会请求对应 symbol 的独立 live store。
 - Live 模式下图表只展示最近 500 笔成交，避免手机端卡顿；Volume Profile 使用最近最多 20,000 笔成交计算，避免 POC、VAH、VAL 被极短窗口压扁。
 - POC 显示成交量最大分桶的中心价；VAH/VAL 显示价值区的上沿/下沿边界价，不再直接显示分桶中心价。
 - 如果最新价仍明显落后，优先看 Connection / 连接状态和浏览器网络请求，确认 Binance WebSocket 是否仍为 `connected`。

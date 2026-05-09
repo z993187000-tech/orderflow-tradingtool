@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass
 from typing import Callable
 
-from crypto_perp_tool.market_data.events import MarkPriceEvent, QuoteEvent, TradeEvent
+from crypto_perp_tool.market_data.events import MarkPriceEvent, QuoteEvent, SpotPriceEvent, TradeEvent
 
 
 @dataclass(frozen=True)
@@ -15,6 +15,7 @@ class BinanceStreamConfig:
     symbol: str
     market_base_url: str = "wss://fstream.binance.com/market/stream"
     public_base_url: str = "wss://fstream.binance.com/public/stream"
+    spot_base_url: str = "wss://stream.binance.com:9443/stream"
 
     @property
     def market_streams(self) -> tuple[str, str]:
@@ -26,12 +27,20 @@ class BinanceStreamConfig:
         return (f"{self.symbol.lower()}@bookTicker",)
 
     @property
+    def spot_streams(self) -> tuple[str, ...]:
+        return (f"{self.symbol.lower()}@trade",)
+
+    @property
     def market_url(self) -> str:
         return f"{self.market_base_url}?streams={'/'.join(self.market_streams)}"
 
     @property
     def public_url(self) -> str:
         return f"{self.public_base_url}?streams={'/'.join(self.public_streams)}"
+
+    @property
+    def spot_url(self) -> str:
+        return f"{self.spot_base_url}?streams={'/'.join(self.spot_streams)}"
 
 
 class BinanceAggTradeParser:
@@ -67,6 +76,15 @@ class BinanceMarkPriceParser:
         )
 
 
+class BinanceSpotTradeParser:
+    def parse(self, payload: dict) -> SpotPriceEvent:
+        return SpotPriceEvent(
+            timestamp=int(payload.get("T") or payload["E"]),
+            symbol=str(payload["s"]).upper(),
+            price=float(payload["p"]),
+        )
+
+
 class BinanceAggTradeClient:
     def __init__(
         self,
@@ -74,6 +92,7 @@ class BinanceAggTradeClient:
         on_trade: Callable[[TradeEvent], None],
         on_quote: Callable[[QuoteEvent], None] | None = None,
         on_mark: Callable[[MarkPriceEvent], None] | None = None,
+        on_spot: Callable[[SpotPriceEvent], None] | None = None,
         on_status: Callable[[str, str], None] | None = None,
         reconnect_delay_seconds: float = 3.0,
     ) -> None:
@@ -81,11 +100,13 @@ class BinanceAggTradeClient:
         self.on_trade = on_trade
         self.on_quote = on_quote
         self.on_mark = on_mark
+        self.on_spot = on_spot
         self.on_status = on_status
         self.reconnect_delay_seconds = reconnect_delay_seconds
         self.parser = BinanceAggTradeParser()
         self.quote_parser = BinanceBookTickerParser()
         self.mark_parser = BinanceMarkPriceParser()
+        self.spot_parser = BinanceSpotTradeParser()
         self._stop = threading.Event()
 
     def start_background(self) -> threading.Thread:
@@ -113,9 +134,20 @@ class BinanceAggTradeClient:
             raise RuntimeError("Install the 'websockets' package to use Binance live mode.") from exc
 
         await asyncio.gather(
-            self._consume_stream(self.config.market_url, "market", self.config.market_streams),
-            self._consume_stream(self.config.public_url, "public", self.config.public_streams),
+            self._consume_stream_forever(self.config.market_url, "market", self.config.market_streams),
+            self._consume_stream_forever(self.config.public_url, "public", self.config.public_streams),
+            self._consume_stream_forever(self.config.spot_url, "spot", self.config.spot_streams),
         )
+
+    async def _consume_stream_forever(self, url: str, route: str, streams: tuple[str, ...]) -> None:
+        while not self._stop.is_set():
+            try:
+                await self._consume_stream(url, route, streams)
+            except Exception as exc:
+                if self._stop.is_set():
+                    break
+                self._report_status("error", f"{route}: {exc}")
+                await asyncio.sleep(self.reconnect_delay_seconds)
 
     async def _consume_stream(self, url: str, route: str, streams: tuple[str, ...]) -> None:
         import websockets
@@ -142,6 +174,10 @@ class BinanceAggTradeClient:
         if event_type == "markPriceUpdate" or "@markPrice" in stream:
             if self.on_mark is not None:
                 self.on_mark(self.mark_parser.parse(data))
+            return
+        if event_type == "trade" or stream.endswith("@trade"):
+            if self.on_spot is not None:
+                self.on_spot(self.spot_parser.parse(data))
 
     def _report_status(self, status: str, message: str) -> None:
         if self.on_status is not None:

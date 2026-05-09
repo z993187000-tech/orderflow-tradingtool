@@ -38,6 +38,19 @@ class WebServerTests(unittest.TestCase):
 
         self.assertTrue(callable(handler))
 
+    def test_handler_factory_accepts_live_stores_for_multiple_symbols(self):
+        handler = create_app_handler(
+            data_path=PROJECT_ROOT / "data" / "sample_trades.csv",
+            live_stores={
+                "BTCUSDT": LiveOrderflowStore("BTCUSDT"),
+                "ETHUSDT": LiveOrderflowStore("ETHUSDT"),
+            },
+            source="binance",
+            symbol="BTCUSDT",
+        )
+
+        self.assertTrue(callable(handler))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -21,6 +21,7 @@ def create_app_handler(
     data_path: Path | str,
     journal_path: Path | str | None = None,
     live_store: LiveOrderflowStore | None = None,
+    live_stores: dict[str, LiveOrderflowStore] | None = None,
     source: str = "csv",
     symbol: str = "BTCUSDT",
     password: str | None = None,
@@ -39,8 +40,14 @@ def create_app_handler(
                 return
             if parsed.path == "/api/orderflow":
                 query = parse_qs(parsed.query)
-                requested_symbol = query.get("symbol", [symbol])[0]
-                payload = live_store.view() if live_store is not None else build_orderflow_view(data_path, symbol=requested_symbol)
+                requested_symbol = query.get("symbol", [symbol])[0].upper()
+                if live_stores is not None:
+                    store = live_stores.get(requested_symbol) or live_stores[symbol.upper()]
+                    payload = store.view()
+                elif live_store is not None:
+                    payload = live_store.view()
+                else:
+                    payload = build_orderflow_view(data_path, symbol=requested_symbol)
                 self._send_json(payload)
                 return
 
@@ -92,19 +99,25 @@ def serve_dashboard(
     source: str = "csv",
     symbol: str = "BTCUSDT",
 ) -> ThreadingHTTPServer:
-    live_store = None
-    client = None
+    live_stores = None
+    clients = []
     if source == "binance":
-        live_store = LiveOrderflowStore(symbol=symbol)
-        client = BinanceAggTradeClient(
-            symbol=symbol,
-            on_trade=live_store.add_trade,
-            on_quote=live_store.add_quote,
-            on_mark=live_store.add_mark,
-            on_status=live_store.set_connection_status,
-        )
-        client.start_background()
-    handler = create_app_handler(data_path=data_path, live_store=live_store, source=source, symbol=symbol)
+        symbols = tuple(dict.fromkeys([symbol.upper(), "BTCUSDT", "ETHUSDT"]))
+        live_stores = {}
+        for live_symbol in symbols:
+            store = LiveOrderflowStore(symbol=live_symbol)
+            live_stores[live_symbol] = store
+            client = BinanceAggTradeClient(
+                symbol=live_symbol,
+                on_trade=store.add_trade,
+                on_quote=store.add_quote,
+                on_mark=store.add_mark,
+                on_spot=store.add_spot,
+                on_status=store.set_connection_status,
+            )
+            client.start_background()
+            clients.append(client)
+    handler = create_app_handler(data_path=data_path, live_stores=live_stores, source=source, symbol=symbol)
     server = ThreadingHTTPServer((host, port), handler)
     urls = dashboard_urls(host, port)
     print(f"Order-flow dashboard source={source} symbol={symbol}")
@@ -114,7 +127,7 @@ def serve_dashboard(
     try:
         server.serve_forever()
     finally:
-        if client is not None:
+        for client in clients:
             client.stop()
     return server
 

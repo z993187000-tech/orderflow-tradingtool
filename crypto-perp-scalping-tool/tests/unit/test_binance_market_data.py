@@ -5,6 +5,7 @@ from crypto_perp_tool.market_data.binance import (
     BinanceAggTradeParser,
     BinanceBookTickerParser,
     BinanceMarkPriceParser,
+    BinanceSpotTradeParser,
     BinanceStreamConfig,
 )
 
@@ -15,8 +16,10 @@ class BinanceMarketDataTests(unittest.TestCase):
 
         self.assertEqual(config.market_streams, ("btcusdt@aggTrade", "btcusdt@markPrice@1s"))
         self.assertEqual(config.public_streams, ("btcusdt@bookTicker",))
+        self.assertEqual(config.spot_streams, ("btcusdt@trade",))
         self.assertEqual(config.market_url, "wss://fstream.binance.com/market/stream?streams=btcusdt@aggTrade/btcusdt@markPrice@1s")
         self.assertEqual(config.public_url, "wss://fstream.binance.com/public/stream?streams=btcusdt@bookTicker")
+        self.assertEqual(config.spot_url, "wss://stream.binance.com:9443/stream?streams=btcusdt@trade")
 
     def test_parser_converts_aggtrade_payload_to_trade_event(self):
         payload = {
@@ -76,19 +79,38 @@ class BinanceMarketDataTests(unittest.TestCase):
         self.assertEqual(event.funding_rate, 0.00038167)
         self.assertEqual(event.next_funding_time, 1562306400000)
 
-    def test_client_routes_combined_stream_trade_quote_and_mark_payloads(self):
+    def test_spot_trade_parser_converts_payload_to_spot_event(self):
+        payload = {
+            "e": "trade",
+            "E": 1672515782136,
+            "s": "ETHUSDT",
+            "p": "3200.25",
+            "q": "0.20",
+            "T": 1672515782135,
+        }
+
+        event = BinanceSpotTradeParser().parse(payload)
+
+        self.assertEqual(event.timestamp, 1672515782135)
+        self.assertEqual(event.symbol, "ETHUSDT")
+        self.assertEqual(event.price, 3200.25)
+
+    def test_client_routes_combined_stream_trade_quote_mark_and_spot_payloads(self):
         trades = []
         quotes = []
         marks = []
-        client = BinanceAggTradeClient("BTCUSDT", on_trade=trades.append, on_quote=quotes.append, on_mark=marks.append)
+        spots = []
+        client = BinanceAggTradeClient("BTCUSDT", on_trade=trades.append, on_quote=quotes.append, on_mark=marks.append, on_spot=spots.append)
 
         client._handle_payload({"stream": "btcusdt@bookTicker", "data": {"E": 1, "s": "BTCUSDT", "b": "100", "a": "102"}})
         client._handle_payload({"stream": "btcusdt@aggTrade", "data": {"E": 2, "T": 2, "s": "BTCUSDT", "p": "101", "q": "0.5", "m": False}})
         client._handle_payload({"stream": "btcusdt@markPrice@1s", "data": {"e": "markPriceUpdate", "E": 3, "s": "BTCUSDT", "p": "99", "i": "98", "r": "0.001", "T": 4}})
+        client._handle_payload({"stream": "btcusdt@trade", "data": {"e": "trade", "E": 5, "T": 5, "s": "BTCUSDT", "p": "103", "q": "0.1"}})
 
         self.assertEqual(quotes[0].mid_price, 101)
         self.assertEqual(trades[0].price, 101)
         self.assertEqual(marks[0].mark_price, 99)
+        self.assertEqual(spots[0].price, 103)
 
     def test_client_reports_status_changes(self):
         statuses = []
