@@ -99,6 +99,7 @@ def serve_dashboard(
         client = BinanceAggTradeClient(
             symbol=symbol,
             on_trade=live_store.add_trade,
+            on_quote=live_store.add_quote,
             on_status=live_store.set_connection_status,
         )
         client.start_background()
