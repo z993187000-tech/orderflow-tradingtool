@@ -129,6 +129,31 @@ class LiveOrderflowStoreTests(unittest.TestCase):
         self.assertEqual(poc["price"], 100)
         self.assertEqual(view["summary"]["profile_trade_count"], 600)
 
+    def test_live_store_exposes_automatic_paper_trading_results(self):
+        store = LiveOrderflowStore(symbol="BTCUSDT", max_events=20)
+
+        for event in [
+            TradeEvent(1000, "BTCUSDT", 100, 5, True),
+            TradeEvent(2000, "BTCUSDT", 110, 20, False),
+            TradeEvent(3000, "BTCUSDT", 120, 3, True),
+            TradeEvent(4000, "BTCUSDT", 130, 5, True),
+            TradeEvent(5000, "BTCUSDT", 140, 30, False),
+            TradeEvent(6000, "BTCUSDT", 150, 5, True),
+            TradeEvent(7000, "BTCUSDT", 126, 12, False),
+            TradeEvent(8000, "BTCUSDT", 141, 10, False),
+        ]:
+            store.add_trade(event)
+
+        view = store.view()
+
+        self.assertGreaterEqual(view["summary"]["signals"], 1)
+        self.assertGreaterEqual(view["summary"]["orders"], 1)
+        self.assertGreaterEqual(view["summary"]["closed_positions"], 1)
+        self.assertGreater(view["summary"]["realized_pnl"], 0)
+        self.assertGreater(view["summary"]["pnl_24h"], 0)
+        self.assertGreaterEqual(len(view["details"]["paper"]["signals"]), 1)
+        self.assertGreaterEqual(len(view["markers"]), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

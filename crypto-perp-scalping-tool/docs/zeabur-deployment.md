@@ -67,6 +67,7 @@ https://orderflow-tradingtool.zeabur.app/healthz
 
 - Web Dashboard：可运行，支持手机和桌面浏览器。
 - Binance WebSocket：已接入 USDⓈ-M Futures `aggTrade`。
+- Live paper auto trading：Zeabur live market dashboard 会在内存中运行自动 paper 策略闭环，能从 Binance 公开行情生成 paper signal、paper order、paper close 和 paper PnL，但仍不会向交易所发送真实订单。
 - CSV replay：保留，用于测试和复盘。
 - Paper runner：可从 CSV 生成 signal、paper fill、position close、PnL。
 - Telegram command handler：有命令边界，但还没有联网 long polling worker。

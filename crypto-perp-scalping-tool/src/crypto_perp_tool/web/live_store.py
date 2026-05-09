@@ -5,6 +5,7 @@ from collections import deque
 from typing import Any
 
 from crypto_perp_tool.config import default_settings
+from crypto_perp_tool.execution import PaperTradingEngine
 from crypto_perp_tool.market_data import MarkPriceEvent, QuoteEvent, SpotPriceEvent, TradeEvent
 from crypto_perp_tool.profile import VolumeProfileEngine
 from crypto_perp_tool.web.details import empty_execution_details, mode_breakdown, total_pnl_for_range
@@ -19,6 +20,7 @@ class LiveOrderflowStore:
         self._quote: QuoteEvent | None = None
         self._mark: MarkPriceEvent | None = None
         self._spot: SpotPriceEvent | None = None
+        self._paper = PaperTradingEngine(symbol=self.symbol)
         self._connection_status = "starting"
         self._connection_message = "waiting for Binance stream"
         self._lock = threading.Lock()
@@ -28,6 +30,7 @@ class LiveOrderflowStore:
             return
         with self._lock:
             self._events.append(event)
+            self._paper.process_trade(event, self._quote)
 
     def add_quote(self, event: QuoteEvent) -> None:
         if event.symbol.upper() != self.symbol:
@@ -58,6 +61,9 @@ class LiveOrderflowStore:
             quote = self._quote
             mark = self._mark
             spot = self._spot
+            details = self._paper.details()
+            paper_summary = self._paper.summary()
+            markers = self._paper.markers()
             connection_status = self._connection_status
             connection_message = self._connection_message
 
@@ -68,7 +74,8 @@ class LiveOrderflowStore:
         trades: list[dict[str, Any]] = []
         delta_series: list[dict[str, Any]] = []
         display_events = events[-self.display_events :]
-        details = empty_execution_details()
+        if not details:
+            details = empty_execution_details()
 
         for event in events:
             profile.add_trade(event.price, event.quantity)
@@ -95,6 +102,7 @@ class LiveOrderflowStore:
                 }
             )
 
+        markers = _attach_marker_indexes(markers, trades)
         last_trade_price = trades[-1]["price"] if trades else None
         quote_mid_price = quote.mid_price if quote is not None else None
         spot_last_price = spot.price if spot is not None else None
@@ -128,10 +136,11 @@ class LiveOrderflowStore:
                 "next_funding_time": mark.next_funding_time if mark is not None else None,
                 "price_source": price_source,
                 "cumulative_delta": cumulative_delta,
-                "signals": 0,
-                "orders": 0,
-                "closed_positions": 0,
-                "realized_pnl": 0,
+                "signals": paper_summary["signals"],
+                "orders": paper_summary["orders"],
+                "closed_positions": paper_summary["closed_positions"],
+                "realized_pnl": paper_summary["realized_pnl"],
+                "open_position": paper_summary["open_position"],
                 "pnl_24h": total_pnl_for_range(details, "24h"),
                 "mode_breakdown": mode_breakdown(details),
             },
@@ -148,6 +157,20 @@ class LiveOrderflowStore:
                 }
                 for level in profile.levels("rolling_4h")
             ],
-            "markers": [],
+            "markers": markers,
             "details": details,
         }
+
+
+def _attach_marker_indexes(markers: list[dict[str, Any]], trades: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not trades:
+        return []
+    attached = []
+    for marker in markers:
+        price = marker.get("price")
+        if price is None:
+            continue
+        copy = dict(marker)
+        copy["index"] = min(range(len(trades)), key=lambda index: abs(trades[index]["price"] - price))
+        attached.append(copy)
+    return attached

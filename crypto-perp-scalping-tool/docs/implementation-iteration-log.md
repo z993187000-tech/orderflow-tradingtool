@@ -213,3 +213,30 @@
 - 新增 LAN IP 探测。
 - 启动时打印 `Local` 和 `Phone/LAN` URL。
 - 文档补充 Windows 防火墙和同一 Wi-Fi 要求。
+
+## Iteration 8：Live Paper Auto Trading Loop
+
+### Issue AA：Live Web 只有行情观察，没有自动 paper 交易闭环
+
+解决：
+
+- 新增 `PaperTradingEngine`，实时消费 Binance futures `aggTrade`。
+- 每笔成交都会更新 profile、delta、VWAP，并调用 `SignalEngine` 和 `RiskEngine`。
+- 风控通过后立即创建 paper order 和 open position。
+- 后续成交触发 stop/target 时自动记录 closed position 和 realized PnL。
+
+### Issue AB：Web 顶部 paper 指标仍是占位值
+
+解决：
+
+- `LiveOrderflowStore` 为每个 symbol 持有独立 paper engine。
+- `/api/orderflow` 的 Signals、Orders、Closed、Paper PnL、details 和 markers 来自实时 paper engine。
+- Price And Execution 图表显示 signal marker 和 position close marker。
+
+### Issue AC：Recent Tape 时间戳不可读，订单明细缺少止损止盈
+
+解决：
+
+- Recent Tape 的毫秒时间戳格式化为可读时间。
+- Orders 明细表新增 Stop / 止损 与 Target / 止盈列。
+- Orders 卡片在有 open paper position 时显示当前入场、止损、止盈。

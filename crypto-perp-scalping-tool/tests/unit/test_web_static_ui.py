@@ -58,6 +58,20 @@ class WebStaticUiTests(unittest.TestCase):
         self.assertIn("index_price", js)
         self.assertIn("last_trade_price", js)
 
+    def test_recent_tape_formats_timestamp_as_readable_time(self):
+        js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn("formatTapeTimestamp", js)
+        self.assertIn("formatTapeTimestamp(trade.timestamp)", js)
+
+    def test_order_details_show_stop_and_target_prices(self):
+        js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn("Stop / 止损", js)
+        self.assertIn("Target / 止盈", js)
+        self.assertIn("record.stop_price", js)
+        self.assertIn("record.target_price", js)
+
 
 if __name__ == "__main__":
     unittest.main()

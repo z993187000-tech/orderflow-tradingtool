@@ -91,7 +91,9 @@ function renderSummary(summary) {
   els.signals.textContent = formatNumber(summary.signals);
   els.signalsSplit.textContent = splitLabel(breakdown, "signals");
   els.orders.textContent = formatNumber(summary.orders);
-  els.ordersSplit.textContent = splitLabel(breakdown, "orders");
+  els.ordersSplit.textContent = summary.open_position
+    ? openPositionLabel(summary.open_position)
+    : splitLabel(breakdown, "orders");
   els.closed.textContent = formatNumber(summary.closed_positions);
   els.closedSplit.textContent = splitLabel(breakdown, "closed_positions");
   els.pnl.textContent = formatNumber(summary.pnl_24h);
@@ -141,7 +143,7 @@ function renderRecordTable(kind, records) {
 
 function recordHeader(kind) {
   if (kind === "signals") return "<thead><tr><th>Time / 时间</th><th>Side / 方向</th><th>Setup / 形态</th><th>Entry / 入场</th></tr></thead>";
-  if (kind === "orders") return "<thead><tr><th>Time / 时间</th><th>Side / 方向</th><th>Qty / 数量</th><th>Entry / 入场</th></tr></thead>";
+  if (kind === "orders") return "<thead><tr><th>Time / 时间</th><th>Side / 方向</th><th>Qty / 数量</th><th>Entry / 入场</th><th>Stop / 止损</th><th>Target / 止盈</th></tr></thead>";
   if (kind === "closed_positions") return "<thead><tr><th>Time / 时间</th><th>Side / 方向</th><th>Entry / 入场</th><th>Close / 平仓</th><th>PnL / 盈亏</th></tr></thead>";
   return "<thead><tr><th>Time / 时间</th><th>Side / 方向</th><th>PnL / 盈亏</th></tr></thead>";
 }
@@ -151,7 +153,7 @@ function recordRow(kind, record) {
     return `<tr><td>${formatTimestamp(record.timestamp)}</td><td>${record.side || "--"}</td><td>${record.setup || "--"}</td><td>${formatNumber(record.entry_price)}</td></tr>`;
   }
   if (kind === "orders") {
-    return `<tr><td>${formatTimestamp(record.timestamp)}</td><td>${record.side || "--"}</td><td>${formatNumber(record.quantity)}</td><td>${formatNumber(record.entry_price)}</td></tr>`;
+    return `<tr><td>${formatTimestamp(record.timestamp)}</td><td>${record.side || "--"}</td><td>${formatNumber(record.quantity)}</td><td>${formatNumber(record.entry_price)}</td><td>${formatNumber(record.stop_price)}</td><td>${formatNumber(record.target_price)}</td></tr>`;
   }
   if (kind === "closed_positions") {
     const pnlClass = record.realized_pnl >= 0 ? "buy" : "sell";
@@ -244,7 +246,7 @@ function renderTape(trades) {
   els.tape.innerHTML = trades.map(trade => {
     const klass = trade.side === "buy" ? "buy" : "sell";
     return `<tr>
-      <td>${trade.timestamp}</td>
+      <td>${formatTapeTimestamp(trade.timestamp)}</td>
       <td class="${klass}">${trade.side}</td>
       <td>${formatNumber(trade.price)}</td>
       <td>${formatNumber(trade.quantity)}</td>
@@ -302,6 +304,10 @@ function splitLabel(breakdown, key) {
   return `模拟 ${formatNumber(breakdown.paper[key])} / 实盘 ${formatNumber(breakdown.live[key])}`;
 }
 
+function openPositionLabel(position) {
+  return `Open ${position.side} @ ${formatNumber(position.entry_price)} / SL ${formatNumber(position.stop_price)} / TP ${formatNumber(position.target_price)}`;
+}
+
 function emptyBreakdown() {
   return {
     paper: { signals: 0, orders: 0, closed_positions: 0, pnl_24h: 0 },
@@ -324,6 +330,13 @@ function formatTimestamp(value) {
   const number = Number(value);
   if (number < 946684800000) return number.toString();
   return new Date(number).toLocaleString();
+}
+
+function formatTapeTimestamp(value) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return "--";
+  const number = Number(value);
+  if (number < 946684800000) return number.toString();
+  return new Date(number).toLocaleTimeString(undefined, { hour12: false });
 }
 
 function formatAxisValue(value) {

@@ -134,6 +134,27 @@ http://127.0.0.1:8000
 - 如果最新价仍明显落后，优先看 Connection / 连接状态和浏览器网络请求，确认 Binance WebSocket 是否仍为 `connected`。
 - 手机端价格图高度固定在约 210px、Delta 图约 160px，避免 canvas 因浏览器比例计算被拉成长图。
 
+## Live Paper Auto Trading / 实时 Paper 自动交易
+
+当前 `web serve --source binance` 不只是观察行情。每个 Binance USDⓈ-M Futures `aggTrade` 成交事件都会同步进入 paper 策略引擎，形成一个完整的模拟自动交易闭环：
+
+- 更新成交量分布：POC / HVN / LVN / VAH / VAL。
+- 更新订单流：主动买卖 Delta、VWAP、滚动成交量。
+- 用 `SignalEngine` 识别 LVN 上下沿接受后的 long/short 信号。
+- 用 `RiskEngine` 校验单笔风险、日内风险、连续亏损和滑点参数。
+- 通过风控后立即模拟成交，并创建一个 paper position。
+- 后续实时成交触及 stop 或 target 时自动平仓，记录 realized PnL。
+- Web 顶部的 Signals、Orders、Closed、Paper PnL 来自这个实时 paper 引擎，不再是占位数字。
+- Price And Execution 图会显示 signal marker 和 position close marker，方便复盘。
+- Recent Tape 的 `time` 会格式化为可读时间，`qty` 仍是合约基础资产数量，例如 BTCUSDT 的 qty 是 BTC 数量。
+
+安全边界：
+
+- 这仍然是 paper trading，不会向 Binance 下真实订单。
+- 真实 API key、真实下单、reduce-only 止损止盈还没有接入。
+- 当前每个 symbol 同一时间只允许一个 paper position，避免同方向信号连续刷单。
+- 默认信号冷却为 60 秒；单元测试中会把冷却设为 0 来验证交易闭环。
+
 ## 单独检查 Risk Engine
 
 准备一个 JSON 文件：
