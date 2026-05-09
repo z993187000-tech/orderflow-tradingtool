@@ -44,6 +44,29 @@ class LiveOrderflowStoreTests(unittest.TestCase):
         self.assertEqual(summary["connection_status"], "error")
         self.assertEqual(summary["connection_message"], "Install websockets")
 
+    def test_live_store_exposes_empty_mode_detail_payloads(self):
+        store = LiveOrderflowStore(symbol="BTCUSDT", max_events=10)
+        view = store.view()
+
+        self.assertEqual(view["summary"]["pnl_24h"], 0)
+        self.assertEqual(view["summary"]["mode_breakdown"]["paper"]["signals"], 0)
+        self.assertEqual(view["summary"]["mode_breakdown"]["live"]["orders"], 0)
+        self.assertEqual(view["details"]["paper"]["pnl_by_range"]["all"], 0)
+        self.assertEqual(view["details"]["live"]["closed_positions"], [])
+
+    def test_live_store_uses_larger_profile_window_than_display_window(self):
+        store = LiveOrderflowStore(symbol="BTCUSDT", max_events=650)
+        store.add_trade(TradeEvent(1000, "BTCUSDT", 100, 500, False))
+        for index in range(1, 600):
+            store.add_trade(TradeEvent(1000 + index, "BTCUSDT", 200 + index, 1, False))
+
+        view = store.view()
+        poc = next(level for level in view["profile_levels"] if level["type"] == "POC")
+
+        self.assertLessEqual(len(view["trades"]), 500)
+        self.assertEqual(poc["price"], 100)
+        self.assertEqual(view["summary"]["profile_trade_count"], 600)
+
 
 if __name__ == "__main__":
     unittest.main()
