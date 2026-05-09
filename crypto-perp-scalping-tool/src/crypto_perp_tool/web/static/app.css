@@ -245,6 +245,14 @@ canvas {
   display: block;
 }
 
+#priceCanvas {
+  height: clamp(180px, 36vh, 360px);
+}
+
+#deltaCanvas {
+  height: clamp(140px, 24vh, 220px);
+}
+
 .levels {
   display: grid;
   gap: 8px;
@@ -353,5 +361,13 @@ td:nth-child(2) {
       "price"
       "delta"
       "profile";
+  }
+
+  #priceCanvas {
+    height: 210px;
+  }
+
+  #deltaCanvas {
+    height: 160px;
   }
 }
