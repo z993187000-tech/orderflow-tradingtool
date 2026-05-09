@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from crypto_perp_tool.market_data.binance import BinanceAggTradeClient
+from crypto_perp_tool.web.auth import is_authorized, required_auth_header
 from crypto_perp_tool.web.health import health_payload
 from crypto_perp_tool.web.live_store import LiveOrderflowStore
 from crypto_perp_tool.web.network import dashboard_urls
@@ -21,14 +23,19 @@ def create_app_handler(
     live_store: LiveOrderflowStore | None = None,
     source: str = "csv",
     symbol: str = "BTCUSDT",
+    password: str | None = None,
 ):
     data_path = Path(data_path)
+    password = os.getenv("PASSWORD") if password is None else password
 
     class DashboardHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
             parsed = urlparse(self.path)
             if parsed.path == "/healthz":
                 self._send_json(health_payload(source=source, symbol=symbol))
+                return
+            if not is_authorized(self.headers, password):
+                self._send_unauthorized()
                 return
             if parsed.path == "/api/orderflow":
                 query = parse_qs(parsed.query)
@@ -54,6 +61,15 @@ def create_app_handler(
             body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _send_unauthorized(self) -> None:
+            body = b"Authentication required"
+            self.send_response(401)
+            self.send_header("WWW-Authenticate", required_auth_header())
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
