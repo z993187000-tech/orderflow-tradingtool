@@ -44,6 +44,14 @@ python -m crypto_perp_tool.cli web serve --source binance --symbol BTCUSDT --mob
 
 Open the printed `Phone/LAN` URL on your phone.
 
+For public access through Zeabur, open:
+
+```text
+https://orderflow-tradingtool.zeabur.app/
+```
+
+Set the Zeabur environment variable `PASSWORD` before exposing the dashboard publicly. The browser login username can be `admin` or any value; the password is the `PASSWORD` value. `/healthz` stays public for deployment health checks.
+
 ## Safety
 
 This project is an engineering scaffold, not financial advice. Keep `mode=paper` until the strategy has passed backtests, simulation tests, and a paper-trading burn-in.
