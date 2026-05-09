@@ -32,6 +32,8 @@ class WebServerTests(unittest.TestCase):
         handler = create_app_handler(
             data_path=PROJECT_ROOT / "data" / "sample_trades.csv",
             live_store=LiveOrderflowStore("BTCUSDT"),
+            source="binance",
+            symbol="BTCUSDT",
         )
 
         self.assertTrue(callable(handler))

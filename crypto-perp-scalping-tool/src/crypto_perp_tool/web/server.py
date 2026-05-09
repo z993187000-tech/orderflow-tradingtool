@@ -6,6 +6,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from crypto_perp_tool.market_data.binance import BinanceAggTradeClient
+from crypto_perp_tool.web.health import health_payload
 from crypto_perp_tool.web.live_store import LiveOrderflowStore
 from crypto_perp_tool.web.network import dashboard_urls
 from crypto_perp_tool.web.orderflow import build_orderflow_view
@@ -18,16 +19,21 @@ def create_app_handler(
     data_path: Path | str,
     journal_path: Path | str | None = None,
     live_store: LiveOrderflowStore | None = None,
+    source: str = "csv",
+    symbol: str = "BTCUSDT",
 ):
     data_path = Path(data_path)
 
     class DashboardHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
             parsed = urlparse(self.path)
+            if parsed.path == "/healthz":
+                self._send_json(health_payload(source=source, symbol=symbol))
+                return
             if parsed.path == "/api/orderflow":
                 query = parse_qs(parsed.query)
-                symbol = query.get("symbol", ["BTCUSDT"])[0]
-                payload = live_store.view() if live_store is not None else build_orderflow_view(data_path, symbol=symbol)
+                requested_symbol = query.get("symbol", [symbol])[0]
+                payload = live_store.view() if live_store is not None else build_orderflow_view(data_path, symbol=requested_symbol)
                 self._send_json(payload)
                 return
 
@@ -80,7 +86,7 @@ def serve_dashboard(
             on_status=live_store.set_connection_status,
         )
         client.start_background()
-    handler = create_app_handler(data_path=data_path, live_store=live_store)
+    handler = create_app_handler(data_path=data_path, live_store=live_store, source=source, symbol=symbol)
     server = ThreadingHTTPServer((host, port), handler)
     urls = dashboard_urls(host, port)
     print(f"Order-flow dashboard source={source} symbol={symbol}")

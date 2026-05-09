@@ -9,3 +9,7 @@ build/
 *.egg-info/
 src/*.egg-info/
 data/*.jsonl
+.env
+.git/
+tests/
+docs/

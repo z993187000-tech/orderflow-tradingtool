@@ -19,6 +19,7 @@ tests/                  Unit tests for the implementation contracts
 - [Implementation framework](docs/implementation-framework.md)
 - [Project issues and resolutions](docs/project-issues-and-resolutions.md)
 - [Usage](docs/usage.md)
+- [Zeabur deployment](docs/zeabur-deployment.md)
 
 ## Interaction And Deployment
 

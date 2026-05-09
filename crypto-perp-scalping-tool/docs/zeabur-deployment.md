@@ -1,0 +1,71 @@
+# Zeabur 部署准备
+
+## 当前推荐部署形态
+
+在 Zeabur 上先运行 Web Dashboard + Binance public market data。当前服务只连接 Binance 公开 WebSocket 行情，不执行真实下单。
+
+默认启动命令由 Dockerfile 提供：
+
+```sh
+crypto-tool web serve --source ${WEB_SOURCE:-binance} --symbol ${SYMBOL:-BTCUSDT} --host 0.0.0.0 --port ${PORT:-8080}
+```
+
+## Zeabur 操作步骤
+
+1. 把仓库推到 GitHub。
+2. 在 Zeabur 新建 Project。
+3. 选择从 GitHub repository 部署。
+4. 如果 Zeabur 让你选择 Root Directory，选择：
+
+```text
+crypto-perp-scalping-tool
+```
+
+5. 部署方式选择 Dockerfile。
+6. 配置环境变量：
+
+```text
+WEB_SOURCE=binance
+SYMBOL=BTCUSDT
+PORT=8080
+```
+
+7. 部署完成后打开 Zeabur 分配的域名。
+8. 健康检查地址：
+
+```text
+/healthz
+```
+
+## 环境变量说明
+
+- `WEB_SOURCE`：`binance` 或 `csv`。Zeabur 默认建议 `binance`。
+- `SYMBOL`：默认 `BTCUSDT`，也可改成 `ETHUSDT`。
+- `PORT`：Zeabur 通常会注入端口；Dockerfile 默认 `8080`。
+
+## 当前模块状态
+
+- Web Dashboard：可运行，支持手机和桌面浏览器。
+- Binance WebSocket：已接入 USDⓈ-M Futures `aggTrade`。
+- CSV replay：保留，用于测试和复盘。
+- Paper runner：可从 CSV 生成 signal、paper fill、position close、PnL。
+- Telegram command handler：有命令边界，但还没有联网 long polling worker。
+- Live trading execution：未接入，当前 Zeabur 部署不执行真实下单。
+
+## 部署前检查
+
+本地执行：
+
+```powershell
+python -m pip install -e .
+python -m unittest discover -s tests/unit
+python -m crypto_perp_tool.cli web serve --source binance --symbol BTCUSDT --mobile --port 8000
+```
+
+确认浏览器能打开后再推送到 GitHub。
+
+## 注意事项
+
+- 当前 Binance WebSocket 使用公开行情，不需要 API key。
+- Zeabur 适合 paper/live-market 观察和 Web 面板。
+- 后续若接真实自动下单，交易核心建议迁移到更可控的 VPS，并启用固定 IP、交易所 API key IP 白名单和独立监控。
