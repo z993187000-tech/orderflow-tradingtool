@@ -10,6 +10,7 @@ from crypto_perp_tool.market_data import TradeEvent
 from crypto_perp_tool.paper import PaperRunner
 from crypto_perp_tool.profile import VolumeProfileEngine
 from crypto_perp_tool.serialization import to_jsonable
+from crypto_perp_tool.web.details import build_paper_details_from_journal, mode_breakdown, total_pnl_for_range
 
 
 def build_orderflow_view(data_path: Path | str, symbol: str = "BTCUSDT") -> dict[str, Any]:
@@ -50,6 +51,7 @@ def build_orderflow_view(data_path: Path | str, symbol: str = "BTCUSDT") -> dict
         journal_path = Path(tmp) / "paper_journal.jsonl"
         result = PaperRunner(equity=10_000, journal_path=journal_path).run_csv(path, symbol=symbol)
         markers = _markers_from_journal(journal_path, trades)
+        details = build_paper_details_from_journal(journal_path)
 
     profile_levels = [
         {
@@ -73,11 +75,14 @@ def build_orderflow_view(data_path: Path | str, symbol: str = "BTCUSDT") -> dict
             "orders": result.orders,
             "closed_positions": result.closed_positions,
             "realized_pnl": result.realized_pnl,
+            "pnl_24h": total_pnl_for_range(details, "24h"),
+            "mode_breakdown": mode_breakdown(details),
         },
         "trades": trades,
         "delta_series": delta_series,
         "profile_levels": profile_levels,
         "markers": markers,
+        "details": details,
     }
 
 
