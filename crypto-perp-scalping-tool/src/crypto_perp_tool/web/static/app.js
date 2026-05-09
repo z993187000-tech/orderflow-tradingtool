@@ -2,6 +2,7 @@ const els = {
   symbol: document.getElementById("symbolSelect"),
   refresh: document.getElementById("refreshButton"),
   lastPrice: document.getElementById("lastPrice"),
+  lastPriceMeta: document.getElementById("lastPriceMeta"),
   cumDelta: document.getElementById("cumDelta"),
   signals: document.getElementById("signals"),
   signalsSplit: document.getElementById("signalsSplit"),
@@ -84,6 +85,8 @@ function renderSummary(summary) {
   els.lastPrice.title = summary.price_source
     ? `price source: ${summary.price_source}`
     : "";
+  els.lastPriceMeta.textContent = `Trade ${formatNumber(summary.last_trade_price)} / Mark ${formatNumber(summary.mark_price)} / Mid ${formatNumber(summary.quote_mid_price)}`;
+  els.lastPriceMeta.title = `Index ${formatNumber(summary.index_price)} / Bid ${formatNumber(summary.bid_price)} / Ask ${formatNumber(summary.ask_price)}`;
   els.cumDelta.textContent = formatNumber(summary.cumulative_delta);
   els.signals.textContent = formatNumber(summary.signals);
   els.signalsSplit.textContent = splitLabel(breakdown, "signals");

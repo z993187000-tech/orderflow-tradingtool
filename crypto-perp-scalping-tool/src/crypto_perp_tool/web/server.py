@@ -100,6 +100,7 @@ def serve_dashboard(
             symbol=symbol,
             on_trade=live_store.add_trade,
             on_quote=live_store.add_quote,
+            on_mark=live_store.add_mark,
             on_status=live_store.set_connection_status,
         )
         client.start_background()

@@ -5,7 +5,7 @@ from collections import deque
 from typing import Any
 
 from crypto_perp_tool.config import default_settings
-from crypto_perp_tool.market_data import QuoteEvent, TradeEvent
+from crypto_perp_tool.market_data import MarkPriceEvent, QuoteEvent, TradeEvent
 from crypto_perp_tool.profile import VolumeProfileEngine
 from crypto_perp_tool.web.details import empty_execution_details, mode_breakdown, total_pnl_for_range
 
@@ -17,6 +17,7 @@ class LiveOrderflowStore:
         self.display_events = display_events
         self._events: deque[TradeEvent] = deque(maxlen=max_events)
         self._quote: QuoteEvent | None = None
+        self._mark: MarkPriceEvent | None = None
         self._connection_status = "starting"
         self._connection_message = "waiting for Binance stream"
         self._lock = threading.Lock()
@@ -33,6 +34,12 @@ class LiveOrderflowStore:
         with self._lock:
             self._quote = event
 
+    def add_mark(self, event: MarkPriceEvent) -> None:
+        if event.symbol.upper() != self.symbol:
+            return
+        with self._lock:
+            self._mark = event
+
     def set_connection_status(self, status: str, message: str) -> None:
         with self._lock:
             self._connection_status = status
@@ -42,6 +49,7 @@ class LiveOrderflowStore:
         with self._lock:
             events = list(self._events)
             quote = self._quote
+            mark = self._mark
             connection_status = self._connection_status
             connection_message = self._connection_message
 
@@ -79,8 +87,9 @@ class LiveOrderflowStore:
                 }
             )
 
-        fallback_trade_price = trades[-1]["price"] if trades else None
-        last_price = quote.mid_price if quote is not None else fallback_trade_price
+        last_trade_price = trades[-1]["price"] if trades else None
+        quote_mid_price = quote.mid_price if quote is not None else None
+        last_price = last_trade_price if last_trade_price is not None else quote_mid_price
         return {
             "summary": {
                 "source": "binance",
@@ -90,9 +99,15 @@ class LiveOrderflowStore:
                 "trade_count": len(trades),
                 "profile_trade_count": len(events),
                 "last_price": last_price,
+                "last_trade_price": last_trade_price,
                 "bid_price": quote.bid_price if quote is not None else None,
                 "ask_price": quote.ask_price if quote is not None else None,
-                "price_source": "bookTicker" if quote is not None else "aggTrade",
+                "quote_mid_price": quote_mid_price,
+                "mark_price": mark.mark_price if mark is not None else None,
+                "index_price": mark.index_price if mark is not None else None,
+                "funding_rate": mark.funding_rate if mark is not None else None,
+                "next_funding_time": mark.next_funding_time if mark is not None else None,
+                "price_source": "aggTrade" if last_trade_price is not None else "bookTicker",
                 "cumulative_delta": cumulative_delta,
                 "signals": 0,
                 "orders": 0,

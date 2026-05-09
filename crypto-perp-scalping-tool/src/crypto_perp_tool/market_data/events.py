@@ -24,3 +24,13 @@ class QuoteEvent:
     @property
     def mid_price(self) -> float:
         return (self.bid_price + self.ask_price) / 2
+
+
+@dataclass(frozen=True)
+class MarkPriceEvent:
+    timestamp: int
+    symbol: str
+    mark_price: float
+    index_price: float
+    funding_rate: float
+    next_funding_time: int

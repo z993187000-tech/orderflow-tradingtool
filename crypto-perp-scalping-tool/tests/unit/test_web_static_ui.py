@@ -47,6 +47,14 @@ class WebStaticUiTests(unittest.TestCase):
         self.assertIn("clamp(", css)
         self.assertIn("rect.height", js)
 
+    def test_summary_shows_trade_and_mark_price_context(self):
+        html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+        js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn('id="lastPriceMeta"', html)
+        self.assertIn("mark_price", js)
+        self.assertIn("last_trade_price", js)
+
 
 if __name__ == "__main__":
     unittest.main()
