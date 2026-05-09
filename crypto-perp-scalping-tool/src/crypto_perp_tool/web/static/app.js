@@ -85,8 +85,8 @@ function renderSummary(summary) {
   els.lastPrice.title = summary.price_source
     ? `price source: ${summary.price_source}`
     : "";
-  els.lastPriceMeta.textContent = `Perp ${formatNumber(summary.last_trade_price)} / Mark ${formatNumber(summary.mark_price)} / Index ${formatNumber(summary.index_price)} / Mid ${formatNumber(summary.quote_mid_price)}`;
-  els.lastPriceMeta.title = `Spot ${formatNumber(summary.spot_last_price)} / Bid ${formatNumber(summary.bid_price)} / Ask ${formatNumber(summary.ask_price)}`;
+  els.lastPriceMeta.textContent = `Spot ${formatNumber(summary.spot_last_price)} / Mark ${formatNumber(summary.mark_price)} / Index ${formatNumber(summary.index_price)} / Mid ${formatNumber(summary.quote_mid_price)}`;
+  els.lastPriceMeta.title = `Perp ${formatNumber(summary.last_trade_price)} / Bid ${formatNumber(summary.bid_price)} / Ask ${formatNumber(summary.ask_price)}`;
   els.cumDelta.textContent = formatNumber(summary.cumulative_delta);
   els.signals.textContent = formatNumber(summary.signals);
   els.signalsSplit.textContent = splitLabel(breakdown, "signals");
@@ -100,7 +100,7 @@ function renderSummary(summary) {
   els.connection.textContent = summary.connection_status || summary.source || "csv";
   els.connection.title = summary.connection_message || "";
   els.sourceLabel.textContent = summary.source === "binance"
-    ? "Binance Spot + Futures / 币安现货与永续行情"
+    ? "Binance Futures Perp / 币安永续合约行情"
     : "CSV Market Replay / CSV 行情回放";
   els.tradeCount.textContent = summary.profile_trade_count
     ? `${summary.trade_count} shown / ${summary.profile_trade_count} profiled`

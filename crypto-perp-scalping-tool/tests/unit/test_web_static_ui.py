@@ -51,7 +51,7 @@ class WebStaticUiTests(unittest.TestCase):
         html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
         js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
 
-        self.assertIn("现货/指数最新价", html)
+        self.assertIn("合约最新价", html)
         self.assertIn('id="lastPriceMeta"', html)
         self.assertIn("spot_last_price", js)
         self.assertIn("mark_price", js)

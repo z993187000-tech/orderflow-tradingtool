@@ -99,22 +99,12 @@ class LiveOrderflowStore:
         quote_mid_price = quote.mid_price if quote is not None else None
         spot_last_price = spot.price if spot is not None else None
         index_price = mark.index_price if mark is not None else None
-        last_price = (
-            spot_last_price
-            if spot_last_price is not None
-            else index_price
-            if index_price is not None
-            else last_trade_price
-            if last_trade_price is not None
-            else quote_mid_price
-        )
+        last_price = last_trade_price if last_trade_price is not None else index_price if index_price is not None else quote_mid_price
         price_source = (
-            "spotTrade"
-            if spot_last_price is not None
+            "aggTrade"
+            if last_trade_price is not None
             else "indexPrice"
             if index_price is not None
-            else "aggTrade"
-            if last_trade_price is not None
             else "bookTicker"
         )
         derived_connection_status = "connected" if last_price is not None else connection_status
