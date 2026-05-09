@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Order Flow Dashboard</title>
+    <link rel="stylesheet" href="/app.css">
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Paper Market Replay</p>
+          <h1>Order Flow Dashboard</h1>
+        </div>
+        <div class="controls">
+          <select id="symbolSelect" aria-label="Symbol">
+            <option value="BTCUSDT">BTCUSDT</option>
+            <option value="ETHUSDT">ETHUSDT</option>
+          </select>
+          <button id="refreshButton" type="button" title="Refresh data">Refresh</button>
+        </div>
+      </header>
+
+      <section class="metrics" aria-label="Summary">
+        <div><span>Last</span><strong id="lastPrice">--</strong></div>
+        <div><span>Cum Delta</span><strong id="cumDelta">--</strong></div>
+        <div><span>Signals</span><strong id="signals">--</strong></div>
+        <div><span>Orders</span><strong id="orders">--</strong></div>
+        <div><span>Closed</span><strong id="closed">--</strong></div>
+        <div><span>Paper PnL</span><strong id="pnl">--</strong></div>
+        <div><span>Connection</span><strong id="connection">--</strong></div>
+      </section>
+
+      <section class="workspace">
+        <div class="panel chart-panel">
+          <div class="panel-head">
+            <h2>Price And Execution</h2>
+            <span id="tradeCount">0 trades</span>
+          </div>
+          <canvas id="priceCanvas" width="900" height="360"></canvas>
+        </div>
+
+        <div class="panel chart-panel">
+          <div class="panel-head">
+            <h2>Cumulative Delta</h2>
+            <span>Buy pressure minus sell pressure</span>
+          </div>
+          <canvas id="deltaCanvas" width="900" height="220"></canvas>
+        </div>
+
+        <aside class="panel profile-panel">
+          <div class="panel-head">
+            <h2>Volume Profile Levels</h2>
+            <span>POC / HVN / LVN / VAH / VAL</span>
+          </div>
+          <div id="profileLevels" class="levels"></div>
+        </aside>
+      </section>
+
+      <section class="panel tape-panel">
+        <div class="panel-head">
+          <h2>Recent Tape</h2>
+          <span>Aggregated trade feed sample</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Side</th>
+                <th>Price</th>
+                <th>Qty</th>
+                <th>Delta</th>
+              </tr>
+            </thead>
+            <tbody id="tapeBody"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+    <script src="/app.js"></script>
+  </body>
+</html>

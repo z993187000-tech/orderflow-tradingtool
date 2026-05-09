@@ -1,0 +1,30 @@
+exchange: binance_futures
+mode: paper
+symbols:
+  - BTCUSDT
+  - ETHUSDT
+risk:
+  risk_per_trade: 0.0025
+  daily_loss_limit: 0.01
+  max_consecutive_losses: 3
+  max_leverage: 3
+  max_symbol_notional_equity_multiple: 2
+execution:
+  entry_timeout_seconds: 10
+  websocket_stale_ms: 1500
+  max_data_lag_ms: 2000
+  btc_max_slippage_bps: 3
+  eth_max_slippage_bps: 4
+profile:
+  session_timezone: UTC
+  value_area_ratio: 0.70
+  rolling_window_minutes: 240
+  btc_bin_size: 10
+  eth_bin_size: 2
+signals:
+  min_reward_risk: 1.2
+  delta_window_seconds:
+    - 15
+    - 30
+    - 60
+  funding_blackout_minutes: 2

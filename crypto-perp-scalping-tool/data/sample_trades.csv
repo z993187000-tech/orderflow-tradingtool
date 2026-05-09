@@ -1,0 +1,9 @@
+timestamp,symbol,price,quantity,is_buyer_maker
+1000,BTCUSDT,100,5,true
+2000,BTCUSDT,110,20,false
+3000,BTCUSDT,120,3,true
+4000,BTCUSDT,130,5,true
+5000,BTCUSDT,140,30,false
+6000,BTCUSDT,150,5,true
+7000,BTCUSDT,126,12,false
+8000,BTCUSDT,141,10,false
