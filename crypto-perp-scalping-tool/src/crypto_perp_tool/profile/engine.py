@@ -32,9 +32,9 @@ class VolumeProfileEngine:
             self._level(ProfileLevelType.POC, poc_price, volumes[poc_price] / average_volume, window)
         ]
 
-        val_price, vah_price = self._value_area_bounds(bins, poc_price, total_volume)
-        levels.append(self._level(ProfileLevelType.VAL, val_price, volumes[val_price] / average_volume, window))
-        levels.append(self._level(ProfileLevelType.VAH, vah_price, volumes[vah_price] / average_volume, window))
+        val_bin, vah_bin = self._value_area_bounds(bins, poc_price, total_volume)
+        levels.append(self._boundary_level(ProfileLevelType.VAL, val_bin, "lower", volumes[val_bin] / average_volume, window))
+        levels.append(self._boundary_level(ProfileLevelType.VAH, vah_bin, "upper", volumes[vah_bin] / average_volume, window))
 
         for index, price in enumerate(bins):
             left = volumes[bins[index - 1]] if index > 0 else None
@@ -67,6 +67,25 @@ class VolumeProfileEngine:
             price=price,
             lower_bound=price - half_bin,
             upper_bound=price + half_bin,
+            strength=strength,
+            window=window,
+        )
+
+    def _boundary_level(
+        self,
+        level_type: ProfileLevelType,
+        bin_price: float,
+        side: str,
+        strength: float,
+        window: str,
+    ) -> ProfileLevel:
+        half_bin = self.bin_size / 2
+        price = bin_price - half_bin if side == "lower" else bin_price + half_bin
+        return ProfileLevel(
+            type=level_type,
+            price=price,
+            lower_bound=bin_price - half_bin,
+            upper_bound=bin_price + half_bin,
             strength=strength,
             window=window,
         )
