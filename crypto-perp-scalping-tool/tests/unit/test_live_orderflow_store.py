@@ -1,6 +1,6 @@
 import unittest
 
-from crypto_perp_tool.market_data import TradeEvent
+from crypto_perp_tool.market_data import QuoteEvent, TradeEvent
 from crypto_perp_tool.web.live_store import LiveOrderflowStore
 
 
@@ -43,6 +43,18 @@ class LiveOrderflowStoreTests(unittest.TestCase):
 
         self.assertEqual(summary["connection_status"], "error")
         self.assertEqual(summary["connection_message"], "Install websockets")
+
+    def test_live_store_uses_book_ticker_mid_as_display_last_price(self):
+        store = LiveOrderflowStore(symbol="BTCUSDT", max_events=10)
+
+        store.add_trade(TradeEvent(1000, "BTCUSDT", 100, 1, False))
+        store.add_quote(QuoteEvent(1100, "BTCUSDT", 108, 110))
+        summary = store.view()["summary"]
+
+        self.assertEqual(summary["last_price"], 109)
+        self.assertEqual(summary["bid_price"], 108)
+        self.assertEqual(summary["ask_price"], 110)
+        self.assertEqual(summary["price_source"], "bookTicker")
 
     def test_live_store_exposes_empty_mode_detail_payloads(self):
         store = LiveOrderflowStore(symbol="BTCUSDT", max_events=10)
