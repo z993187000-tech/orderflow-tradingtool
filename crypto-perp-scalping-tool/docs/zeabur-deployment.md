@@ -28,6 +28,7 @@ crypto-perp-scalping-tool
 WEB_SOURCE=binance
 SYMBOL=BTCUSDT
 PORT=8080
+PASSWORD=你的强密码
 ```
 
 7. 部署完成后打开 Zeabur 分配的域名。
@@ -42,6 +43,25 @@ PORT=8080
 - `WEB_SOURCE`：`binance` 或 `csv`。Zeabur 默认建议 `binance`。
 - `SYMBOL`：默认 `BTCUSDT`，也可改成 `ETHUSDT`。
 - `PORT`：Zeabur 通常会注入端口；Dockerfile 默认 `8080`。
+- `PASSWORD`：公网 Web Dashboard 的访问密码。浏览器弹出登录框时，用户名可填 `admin` 或任意值，密码填这里配置的值。
+
+## 公网访问
+
+Zeabur 分配的 `https://*.zeabur.app` 域名可以被其他网络访问，例如手机流量、公司网络、家里 Wi-Fi 都可以打开。
+
+当前项目会把 `/healthz` 保持为公开接口，用于 Zeabur 健康检查；Web 页面和 `/api/orderflow` 会在设置 `PASSWORD` 后要求 Basic Auth 登录。
+
+你的当前公网地址示例：
+
+```text
+https://orderflow-tradingtool.zeabur.app/
+```
+
+健康检查地址：
+
+```text
+https://orderflow-tradingtool.zeabur.app/healthz
+```
 
 ## 当前模块状态
 
@@ -67,5 +87,6 @@ python -m crypto_perp_tool.cli web serve --source binance --symbol BTCUSDT --mob
 ## 注意事项
 
 - 当前 Binance WebSocket 使用公开行情，不需要 API key。
+- 如果服务暴露到公网，必须设置 `PASSWORD`，不要让交易观察面板裸奔。
 - Zeabur 适合 paper/live-market 观察和 Web 面板。
 - 后续若接真实自动下单，交易核心建议迁移到更可控的 VPS，并启用固定 IP、交易所 API key IP 白名单和独立监控。
