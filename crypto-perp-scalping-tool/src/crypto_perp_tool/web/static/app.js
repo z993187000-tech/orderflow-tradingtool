@@ -81,6 +81,9 @@ async function loadDashboard() {
 function renderSummary(summary) {
   const breakdown = summary.mode_breakdown || emptyBreakdown();
   els.lastPrice.textContent = formatNumber(summary.last_price);
+  els.lastPrice.title = summary.price_source
+    ? `price source: ${summary.price_source}`
+    : "";
   els.cumDelta.textContent = formatNumber(summary.cumulative_delta);
   els.signals.textContent = formatNumber(summary.signals);
   els.signalsSplit.textContent = splitLabel(breakdown, "signals");
@@ -249,13 +252,9 @@ function renderTape(trades) {
 
 function setupCanvas(canvas) {
   const rect = canvas.getBoundingClientRect();
-  const ratio = window.devicePixelRatio || 1;
-  canvas.width = Math.floor(rect.width * ratio);
-  canvas.height = Math.floor(Number(canvas.getAttribute("height")) * ratio);
+  canvas.width = Math.max(1, Math.floor(rect.width));
+  canvas.height = Math.max(1, Math.floor(rect.height || Number(canvas.getAttribute("height"))));
   const ctx = canvas.getContext("2d");
-  ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
-  canvas.width = rect.width;
-  canvas.height = Number(canvas.getAttribute("height"));
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.font = "12px Segoe UI, Arial";
   return ctx;
