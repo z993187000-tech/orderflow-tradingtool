@@ -8,6 +8,7 @@ const els = {
   closed: document.getElementById("closed"),
   pnl: document.getElementById("pnl"),
   connection: document.getElementById("connection"),
+  sourceLabel: document.getElementById("sourceLabel"),
   tradeCount: document.getElementById("tradeCount"),
   priceCanvas: document.getElementById("priceCanvas"),
   deltaCanvas: document.getElementById("deltaCanvas"),
@@ -44,6 +45,9 @@ function renderSummary(summary) {
   els.pnl.className = summary.realized_pnl >= 0 ? "buy" : "sell";
   els.connection.textContent = summary.connection_status || summary.source || "csv";
   els.connection.title = summary.connection_message || "";
+  els.sourceLabel.textContent = summary.source === "binance"
+    ? "Binance Live Market / 币安实时行情"
+    : "CSV Market Replay / CSV 行情回放";
   els.tradeCount.textContent = `${summary.trade_count} trades`;
 }
 
@@ -53,6 +57,7 @@ function drawPrice(canvas, trades, markers) {
   const prices = trades.map(t => t.price);
   const scale = makeScale(prices, canvas.width, canvas.height, 26);
   drawGrid(ctx, canvas);
+  drawYAxis(ctx, canvas, scale, prices);
   ctx.strokeStyle = colors.price;
   ctx.lineWidth = 2;
   ctx.beginPath();
@@ -82,6 +87,7 @@ function drawDelta(canvas, series) {
   const values = series.map(point => point.cumulative_delta);
   const scale = makeScale(values, canvas.width, canvas.height, 22);
   drawGrid(ctx, canvas);
+  drawYAxis(ctx, canvas, scale, values);
   const zeroY = scale.y(0);
   ctx.strokeStyle = colors.grid;
   ctx.beginPath();
@@ -167,10 +173,30 @@ function drawGrid(ctx, canvas) {
   for (let i = 1; i < 4; i += 1) {
     const y = (canvas.height / 4) * i;
     ctx.beginPath();
-    ctx.moveTo(0, y);
+    ctx.moveTo(54, y);
     ctx.lineTo(canvas.width, y);
     ctx.stroke();
   }
+}
+
+function drawYAxis(ctx, canvas, scale, values) {
+  const min = Math.min(...values, 0);
+  const max = Math.max(...values, 0);
+  const ticks = [max, min + (max - min) * 0.5, min];
+  ctx.fillStyle = colors.text;
+  ctx.textAlign = "left";
+  ctx.textBaseline = "middle";
+  ticks.forEach(value => {
+    const y = scale.y(value);
+    ctx.fillText(formatAxisValue(value), 8, Math.min(Math.max(y, 12), canvas.height - 12));
+  });
+}
+
+function formatAxisValue(value) {
+  const abs = Math.abs(value);
+  if (abs >= 1000) return Number(value).toLocaleString(undefined, { maximumFractionDigits: 0 });
+  if (abs >= 10) return Number(value).toLocaleString(undefined, { maximumFractionDigits: 1 });
+  return Number(value).toLocaleString(undefined, { maximumFractionDigits: 2 });
 }
 
 function formatNumber(value) {

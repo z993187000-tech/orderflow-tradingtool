@@ -10,32 +10,32 @@
     <main class="shell">
       <header class="topbar">
         <div>
-          <p class="eyebrow">Paper Market Replay</p>
-          <h1>Order Flow Dashboard</h1>
+          <p class="eyebrow" id="sourceLabel">Binance Live Market / 币安实时行情</p>
+          <h1>Order Flow Dashboard <span>订单流盘面</span></h1>
         </div>
         <div class="controls">
           <select id="symbolSelect" aria-label="Symbol">
             <option value="BTCUSDT">BTCUSDT</option>
             <option value="ETHUSDT">ETHUSDT</option>
           </select>
-          <button id="refreshButton" type="button" title="Refresh data">Refresh</button>
+          <button id="refreshButton" type="button" title="Refresh data">Refresh 刷新</button>
         </div>
       </header>
 
       <section class="metrics" aria-label="Summary">
-        <div><span>Last</span><strong id="lastPrice">--</strong></div>
-        <div><span>Cum Delta</span><strong id="cumDelta">--</strong></div>
-        <div><span>Signals</span><strong id="signals">--</strong></div>
-        <div><span>Orders</span><strong id="orders">--</strong></div>
-        <div><span>Closed</span><strong id="closed">--</strong></div>
-        <div><span>Paper PnL</span><strong id="pnl">--</strong></div>
-        <div><span>Connection</span><strong id="connection">--</strong></div>
+        <div title="最新成交价格"><span>Last / 最新价</span><strong id="lastPrice">--</strong></div>
+        <div title="主动买入成交量减主动卖出成交量的累计值"><span>Cum Delta / 累计Delta</span><strong id="cumDelta">--</strong></div>
+        <div title="策略生成的交易信号数量"><span>Signals / 信号数</span><strong id="signals">--</strong></div>
+        <div title="通过风控后的模拟订单数量"><span>Orders / 订单数</span><strong id="orders">--</strong></div>
+        <div title="已完成平仓的模拟仓位数量"><span>Closed / 平仓数</span><strong id="closed">--</strong></div>
+        <div title="模拟交易已实现盈亏"><span>Paper PnL / 模拟盈亏</span><strong id="pnl">--</strong></div>
+        <div title="行情 WebSocket 或回放数据源状态"><span>Connection / 连接状态</span><strong id="connection">--</strong></div>
       </section>
 
       <section class="workspace">
         <div class="panel chart-panel">
           <div class="panel-head">
-            <h2>Price And Execution</h2>
+            <h2>Price And Execution / 价格与执行</h2>
             <span id="tradeCount">0 trades</span>
           </div>
           <canvas id="priceCanvas" width="900" height="360"></canvas>
@@ -43,16 +43,16 @@
 
         <div class="panel chart-panel">
           <div class="panel-head">
-            <h2>Cumulative Delta</h2>
-            <span>Buy pressure minus sell pressure</span>
+            <h2>Cumulative Delta / 累计主动买卖差</h2>
+            <span>主动买入压力 - 主动卖出压力</span>
           </div>
           <canvas id="deltaCanvas" width="900" height="220"></canvas>
         </div>
 
         <aside class="panel profile-panel">
           <div class="panel-head">
-            <h2>Volume Profile Levels</h2>
-            <span>POC / HVN / LVN / VAH / VAL</span>
+            <h2>Volume Profile Levels / 成交量分布价位</h2>
+            <span>POC成交量最大 / HVN高量节点 / LVN低量节点 / VAH价值区上沿 / VAL价值区下沿</span>
           </div>
           <div id="profileLevels" class="levels"></div>
         </aside>
@@ -60,18 +60,18 @@
 
       <section class="panel tape-panel">
         <div class="panel-head">
-          <h2>Recent Tape</h2>
-          <span>Aggregated trade feed sample</span>
+          <h2>Recent Tape / 成交明细</h2>
+          <span>Binance aggTrade 实时聚合成交</span>
         </div>
         <div class="table-wrap">
           <table>
             <thead>
               <tr>
-                <th>Time</th>
-                <th>Side</th>
-                <th>Price</th>
-                <th>Qty</th>
-                <th>Delta</th>
+                <th>Time / 时间</th>
+                <th>Side / 方向</th>
+                <th>Price / 价格</th>
+                <th>Qty / 数量</th>
+                <th>Delta / 主动差</th>
               </tr>
             </thead>
             <tbody id="tapeBody"></tbody>

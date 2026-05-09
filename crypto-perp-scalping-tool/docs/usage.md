@@ -95,9 +95,15 @@ http://127.0.0.1:8000
 
 当前 Web Dashboard 展示：
 
-- Last price、累计 Delta、信号数、paper orders、平仓数、paper PnL。
-- Price and execution canvas：价格路径、signal marker、平仓 marker。
-- Cumulative Delta canvas：累计 Delta 曲线。
+- Last / 最新价：最新成交价格。
+- Cum Delta / 累计Delta：主动买入成交量减主动卖出成交量的累计值。
+- Signals / 信号数：策略生成的交易信号数量。
+- Orders / 订单数：通过风控后的模拟订单数量。
+- Closed / 平仓数：已完成平仓的模拟仓位数量。
+- Paper PnL / 模拟盈亏：模拟交易已实现盈亏。
+- Connection / 连接状态：Binance WebSocket 或 CSV 回放状态。
+- Price and execution canvas：价格路径、signal marker、平仓 marker，并显示 y 轴价格。
+- Cumulative Delta canvas：累计 Delta 曲线，并显示 y 轴 Delta 值。
 - Volume Profile levels：POC、HVN、LVN、VAH、VAL。
 - Recent Tape：最近成交方向、价格、数量、Delta。
 - Connection：实时模式下显示 Binance WebSocket 连接状态。
