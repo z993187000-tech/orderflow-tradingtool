@@ -27,6 +27,19 @@ class VolumeProfileEngineTests(unittest.TestCase):
         self.assertIn(ProfileLevelType.VAH, level_types)
         self.assertIn(ProfileLevelType.VAL, level_types)
 
+    def test_value_area_levels_use_bin_boundaries_not_poc_center(self):
+        engine = VolumeProfileEngine(bin_size=10, value_area_ratio=0.70)
+
+        engine.add_trade(price=100, quantity=100)
+        levels = engine.levels(window="rolling_4h")
+        poc = next(level for level in levels if level.type == ProfileLevelType.POC)
+        val = next(level for level in levels if level.type == ProfileLevelType.VAL)
+        vah = next(level for level in levels if level.type == ProfileLevelType.VAH)
+
+        self.assertEqual(poc.price, 100)
+        self.assertEqual(val.price, 95)
+        self.assertEqual(vah.price, 105)
+
 
 if __name__ == "__main__":
     unittest.main()
