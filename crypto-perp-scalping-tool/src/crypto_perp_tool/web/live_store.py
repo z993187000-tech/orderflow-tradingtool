@@ -7,12 +7,14 @@ from typing import Any
 from crypto_perp_tool.config import default_settings
 from crypto_perp_tool.market_data import TradeEvent
 from crypto_perp_tool.profile import VolumeProfileEngine
+from crypto_perp_tool.web.details import empty_execution_details, mode_breakdown, total_pnl_for_range
 
 
 class LiveOrderflowStore:
-    def __init__(self, symbol: str, max_events: int = 500) -> None:
+    def __init__(self, symbol: str, max_events: int = 20_000, display_events: int = 500) -> None:
         self.symbol = symbol.upper()
         self.max_events = max_events
+        self.display_events = display_events
         self._events: deque[TradeEvent] = deque(maxlen=max_events)
         self._connection_status = "starting"
         self._connection_message = "waiting for Binance stream"
@@ -41,9 +43,13 @@ class LiveOrderflowStore:
         cumulative_delta = 0.0
         trades: list[dict[str, Any]] = []
         delta_series: list[dict[str, Any]] = []
+        display_events = events[-self.display_events :]
+        details = empty_execution_details()
 
-        for index, event in enumerate(events):
+        for event in events:
             profile.add_trade(event.price, event.quantity)
+
+        for index, event in enumerate(display_events):
             cumulative_delta += event.delta
             trades.append(
                 {
@@ -72,12 +78,15 @@ class LiveOrderflowStore:
                 "connection_status": connection_status,
                 "connection_message": connection_message,
                 "trade_count": len(trades),
+                "profile_trade_count": len(events),
                 "last_price": trades[-1]["price"] if trades else None,
                 "cumulative_delta": cumulative_delta,
                 "signals": 0,
                 "orders": 0,
                 "closed_positions": 0,
                 "realized_pnl": 0,
+                "pnl_24h": total_pnl_for_range(details, "24h"),
+                "mode_breakdown": mode_breakdown(details),
             },
             "trades": trades,
             "delta_series": delta_series,
@@ -93,4 +102,5 @@ class LiveOrderflowStore:
                 for level in profile.levels("rolling_4h")
             ],
             "markers": [],
+            "details": details,
         }
