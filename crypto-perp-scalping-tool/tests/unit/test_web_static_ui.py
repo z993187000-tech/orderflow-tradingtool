@@ -39,6 +39,14 @@ class WebStaticUiTests(unittest.TestCase):
 
         self.assertIn("setInterval(loadDashboard", js)
 
+    def test_mobile_charts_have_bounded_css_height(self):
+        css = (STATIC_DIR / "app.css").read_text(encoding="utf-8")
+        js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn("#priceCanvas", css)
+        self.assertIn("clamp(", css)
+        self.assertIn("rect.height", js)
+
 
 if __name__ == "__main__":
     unittest.main()
