@@ -1,3 +1,3 @@
-from .events import TradeEvent
+from .events import QuoteEvent, TradeEvent
 
-__all__ = ["TradeEvent"]
+__all__ = ["QuoteEvent", "TradeEvent"]
