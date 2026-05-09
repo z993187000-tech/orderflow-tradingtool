@@ -65,6 +65,16 @@ $env:PYTHONPATH='src'
 python -m crypto_perp_tool.cli web serve --source binance --symbol BTCUSDT --port 8000
 ```
 
+带访问密码的公网/共享网络模式：
+
+```powershell
+$env:PYTHONPATH='src'
+$env:PASSWORD='你的强密码'
+python -m crypto_perp_tool.cli web serve --source binance --symbol BTCUSDT --port 8000
+```
+
+设置 `PASSWORD` 后，Web 页面和 `/api/orderflow` 会要求浏览器 Basic Auth 登录。用户名可填 `admin` 或任意值，密码填 `PASSWORD` 的值。`/healthz` 保持公开，用于 Zeabur 健康检查。
+
 手机访问模式：
 
 ```powershell
@@ -173,9 +183,7 @@ python -m crypto_perp_tool.cli risk check --json risk-input.json
 
 ## 当前不包含
 
-- 真实 Binance WebSocket。
 - 真实下单。
 - Telegram long polling。
-- Web Dashboard。
 
-这些属于下一阶段，在 paper replay、journal、risk、signal 的核心契约稳定后再接入。
+这些属于下一阶段，在 paper replay、journal、risk、signal 和 Web 观察面板的核心契约稳定后再接入。
