@@ -7,7 +7,7 @@
 默认启动命令由 Dockerfile 提供：
 
 ```sh
-crypto-tool web serve --source ${WEB_SOURCE:-binance} --symbol ${SYMBOL:-BTCUSDT} --host 0.0.0.0 --port ${PORT:-8080}
+crypto-tool web serve --source ${WEB_SOURCE:-binance} --symbol ${SYMBOL:-BTCUSDT} --host 0.0.0.0 --port ${PORT:-8080} --paper-journal ${PAPER_JOURNAL:-data/live-paper.jsonl}
 ```
 
 ## Zeabur 操作步骤
@@ -29,6 +29,7 @@ WEB_SOURCE=binance
 SYMBOL=BTCUSDT
 PORT=8080
 PASSWORD=你的强密码
+PAPER_JOURNAL=data/live-paper.jsonl
 ```
 
 7. 部署完成后打开 Zeabur 分配的域名。
@@ -44,6 +45,7 @@ PASSWORD=你的强密码
 - `SYMBOL`：默认 `BTCUSDT`，也可改成 `ETHUSDT`。
 - `PORT`：Zeabur 通常会注入端口；Dockerfile 默认 `8080`。
 - `PASSWORD`：公网 Web Dashboard 的访问密码。浏览器弹出登录框时，用户名可填 `admin` 或任意值，密码填这里配置的值。
+- `PAPER_JOURNAL`：实时 paper 交易日志基础路径。服务会按 symbol 拆成 `data/live-paper-btcusdt.jsonl` 和 `data/live-paper-ethusdt.jsonl`。
 
 ## 公网访问
 
@@ -67,7 +69,7 @@ https://orderflow-tradingtool.zeabur.app/healthz
 
 - Web Dashboard：可运行，支持手机和桌面浏览器。
 - Binance WebSocket：已接入 USDⓈ-M Futures `aggTrade`。
-- Live paper auto trading：Zeabur live market dashboard 会在内存中运行自动 paper 策略闭环，能从 Binance 公开行情生成 paper signal、paper order、paper close 和 paper PnL，但仍不会向交易所发送真实订单。
+- Live paper auto trading：Zeabur live market dashboard 会运行自动 paper 策略闭环，能从 Binance 公开行情生成 paper signal、paper order、paper close 和 paper PnL，并写入 jsonl journal；服务重启时会从 journal 恢复 paper orders、open position、closed position 和 realized PnL，但仍不会向交易所发送真实订单。
 - CSV replay：保留，用于测试和复盘。
 - Paper runner：可从 CSV 生成 signal、paper fill、position close、PnL。
 - Telegram command handler：有命令边界，但还没有联网 long polling worker。
@@ -89,5 +91,6 @@ python -m crypto_perp_tool.cli web serve --source binance --symbol BTCUSDT --mob
 
 - 当前 Binance WebSocket 使用公开行情，不需要 API key。
 - 如果服务暴露到公网，必须设置 `PASSWORD`，不要让交易观察面板裸奔。
+- jsonl journal 能恢复进程重启后的 paper 状态；如果 Zeabur 服务没有挂载持久化 Volume，重新部署、迁移或实例替换仍可能让容器文件丢失。长期 paper 验收建议配置 Volume 或后续接入 PostgreSQL。
 - Zeabur 适合 paper/live-market 观察和 Web 面板。
 - 后续若接真实自动下单，交易核心建议迁移到更可控的 VPS，并启用固定 IP、交易所 API key IP 白名单和独立监控。

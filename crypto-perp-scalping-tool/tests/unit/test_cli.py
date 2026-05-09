@@ -45,6 +45,7 @@ class CliTests(unittest.TestCase):
         self.assertIn("--source", result.stdout)
         self.assertIn("binance", result.stdout)
         self.assertIn("--mobile", result.stdout)
+        self.assertIn("--paper-journal", result.stdout)
 
     def test_paper_run_outputs_summary_and_writes_journal(self):
         csv_text = "\n".join(

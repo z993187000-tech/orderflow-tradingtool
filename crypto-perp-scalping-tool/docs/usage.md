@@ -222,3 +222,30 @@ python -m crypto_perp_tool.cli risk check --json risk-input.json
 - Telegram long polling。
 
 这些属于下一阶段，在 paper replay、journal、risk、signal 和 Web 观察面板的核心契约稳定后再接入。
+
+## Live Paper Journal / 实时 Paper 交易日志
+
+`web serve --source binance` 默认会把实时 paper 交易事件写入：
+
+```powershell
+data/live-paper-btcusdt.jsonl
+data/live-paper-ethusdt.jsonl
+```
+
+基础路径可通过 `--paper-journal` 修改：
+
+```powershell
+$env:PYTHONPATH='src'
+python -m crypto_perp_tool.cli web serve --source binance --symbol BTCUSDT --port 8000 --paper-journal data/live-paper.jsonl
+```
+
+如果基础路径是 `data/live-paper.jsonl`，服务会自动为每个 symbol 拆分成 `live-paper-btcusdt.jsonl` 和 `live-paper-ethusdt.jsonl`，避免两个交易对写入同一个文件。
+
+服务重启时，`PaperTradingEngine` 会从已有 jsonl 恢复：
+
+- 已生成的 paper signals。
+- 已模拟成交的 paper orders。
+- 尚未平仓的 open paper position。
+- 已平仓记录、realized PnL 和图表 markers。
+
+这解决的是“进程重启后的 paper 状态恢复”。如果部署平台没有挂载持久化 volume，容器文件仍可能在重新部署、迁移或实例替换时丢失。需要长期保存交易日志时，Zeabur 上应挂载 Volume，或在后续阶段接入 PostgreSQL/对象存储。

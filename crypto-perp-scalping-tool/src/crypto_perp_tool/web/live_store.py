@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 from collections import deque
+from pathlib import Path
 from typing import Any
 
 from crypto_perp_tool.config import default_settings
@@ -12,7 +13,13 @@ from crypto_perp_tool.web.details import empty_execution_details, mode_breakdown
 
 
 class LiveOrderflowStore:
-    def __init__(self, symbol: str, max_events: int = 20_000, display_events: int = 500) -> None:
+    def __init__(
+        self,
+        symbol: str,
+        max_events: int = 20_000,
+        display_events: int = 500,
+        paper_journal_path: Path | str | None = None,
+    ) -> None:
         self.symbol = symbol.upper()
         self.max_events = max_events
         self.display_events = display_events
@@ -20,17 +27,17 @@ class LiveOrderflowStore:
         self._quote: QuoteEvent | None = None
         self._mark: MarkPriceEvent | None = None
         self._spot: SpotPriceEvent | None = None
-        self._paper = PaperTradingEngine(symbol=self.symbol)
+        self._paper = PaperTradingEngine(symbol=self.symbol, journal_path=paper_journal_path)
         self._connection_status = "starting"
         self._connection_message = "waiting for Binance stream"
         self._lock = threading.Lock()
 
-    def add_trade(self, event: TradeEvent) -> None:
+    def add_trade(self, event: TradeEvent, received_at: int | None = None) -> None:
         if event.symbol.upper() != self.symbol:
             return
         with self._lock:
             self._events.append(event)
-            self._paper.process_trade(event, self._quote)
+            self._paper.process_trade(event, self._quote, received_at=received_at)
 
     def add_quote(self, event: QuoteEvent) -> None:
         if event.symbol.upper() != self.symbol:
@@ -70,6 +77,11 @@ class LiveOrderflowStore:
         settings = default_settings()
         bin_size = settings.profile.btc_bin_size if self.symbol == "BTCUSDT" else settings.profile.eth_bin_size
         profile = VolumeProfileEngine(bin_size=bin_size, value_area_ratio=settings.profile.value_area_ratio)
+        latest_event_time = events[-1].timestamp if events else 0
+        rolling_window_ms = settings.profile.rolling_window_minutes * 60 * 1000
+        profile_events = [
+            event for event in events if latest_event_time and latest_event_time - event.timestamp <= rolling_window_ms
+        ]
         cumulative_delta = 0.0
         trades: list[dict[str, Any]] = []
         delta_series: list[dict[str, Any]] = []
@@ -77,7 +89,7 @@ class LiveOrderflowStore:
         if not details:
             details = empty_execution_details()
 
-        for event in events:
+        for event in profile_events:
             profile.add_trade(event.price, event.quantity)
 
         for index, event in enumerate(display_events):
@@ -123,7 +135,8 @@ class LiveOrderflowStore:
                 "connection_status": derived_connection_status,
                 "connection_message": connection_message,
                 "trade_count": len(trades),
-                "profile_trade_count": len(events),
+                "seen_trade_count": len(events),
+                "profile_trade_count": len(profile_events),
                 "last_price": last_price,
                 "spot_last_price": spot_last_price,
                 "last_trade_price": last_trade_price,

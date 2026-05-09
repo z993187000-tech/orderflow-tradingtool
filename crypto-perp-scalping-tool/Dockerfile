@@ -19,4 +19,4 @@ ENV PORT=8080
 
 EXPOSE 8080
 
-CMD ["sh", "-c", "crypto-tool web serve --source ${WEB_SOURCE:-binance} --symbol ${SYMBOL:-BTCUSDT} --host 0.0.0.0 --port ${PORT:-8080}"]
+CMD ["sh", "-c", "crypto-tool web serve --source ${WEB_SOURCE:-binance} --symbol ${SYMBOL:-BTCUSDT} --host 0.0.0.0 --port ${PORT:-8080} --paper-journal ${PAPER_JOURNAL:-data/live-paper.jsonl}"]

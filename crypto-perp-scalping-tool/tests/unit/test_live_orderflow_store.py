@@ -1,4 +1,8 @@
+import json
+import tempfile
+import time
 import unittest
+from pathlib import Path
 
 from crypto_perp_tool.market_data import MarkPriceEvent, QuoteEvent, SpotPriceEvent, TradeEvent
 from crypto_perp_tool.web.live_store import LiveOrderflowStore
@@ -131,16 +135,17 @@ class LiveOrderflowStoreTests(unittest.TestCase):
 
     def test_live_store_exposes_automatic_paper_trading_results(self):
         store = LiveOrderflowStore(symbol="BTCUSDT", max_events=20)
+        base_time = int(time.time() * 1000)
 
         for event in [
-            TradeEvent(1000, "BTCUSDT", 100, 5, True),
-            TradeEvent(2000, "BTCUSDT", 110, 20, False),
-            TradeEvent(3000, "BTCUSDT", 120, 3, True),
-            TradeEvent(4000, "BTCUSDT", 130, 5, True),
-            TradeEvent(5000, "BTCUSDT", 140, 30, False),
-            TradeEvent(6000, "BTCUSDT", 150, 5, True),
-            TradeEvent(7000, "BTCUSDT", 126, 12, False),
-            TradeEvent(8000, "BTCUSDT", 141, 10, False),
+            TradeEvent(base_time + 1000, "BTCUSDT", 100, 5, True),
+            TradeEvent(base_time + 2000, "BTCUSDT", 110, 20, False),
+            TradeEvent(base_time + 3000, "BTCUSDT", 120, 3, True),
+            TradeEvent(base_time + 4000, "BTCUSDT", 130, 5, True),
+            TradeEvent(base_time + 5000, "BTCUSDT", 140, 30, False),
+            TradeEvent(base_time + 6000, "BTCUSDT", 150, 5, True),
+            TradeEvent(base_time + 7000, "BTCUSDT", 126, 12, False),
+            TradeEvent(base_time + 8000, "BTCUSDT", 141, 10, False),
         ]:
             store.add_trade(event)
 
@@ -153,6 +158,45 @@ class LiveOrderflowStoreTests(unittest.TestCase):
         self.assertGreater(view["summary"]["pnl_24h"], 0)
         self.assertGreaterEqual(len(view["details"]["paper"]["signals"]), 1)
         self.assertGreaterEqual(len(view["markers"]), 2)
+
+    def test_live_store_profile_uses_rolling_time_window(self):
+        store = LiveOrderflowStore(symbol="BTCUSDT", max_events=20)
+        old = TradeEvent(1_000, "BTCUSDT", 100, 500, False)
+        recent = TradeEvent(5 * 60 * 60 * 1000, "BTCUSDT", 200, 1, False)
+
+        store.add_trade(old)
+        store.add_trade(recent)
+        view = store.view()
+        poc = next(level for level in view["profile_levels"] if level["type"] == "POC")
+
+        self.assertEqual(view["summary"]["seen_trade_count"], 2)
+        self.assertEqual(view["summary"]["profile_trade_count"], 1)
+        self.assertEqual(poc["price"], 200)
+
+    def test_live_store_writes_paper_trading_journal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            journal_path = Path(tmp) / "live-paper.jsonl"
+            store = LiveOrderflowStore(symbol="BTCUSDT", max_events=20, paper_journal_path=journal_path)
+            base_time = int(time.time() * 1000)
+
+            for event in [
+                TradeEvent(base_time + 1000, "BTCUSDT", 100, 5, True),
+                TradeEvent(base_time + 2000, "BTCUSDT", 110, 20, False),
+                TradeEvent(base_time + 3000, "BTCUSDT", 120, 3, True),
+                TradeEvent(base_time + 4000, "BTCUSDT", 130, 5, True),
+                TradeEvent(base_time + 5000, "BTCUSDT", 140, 30, False),
+                TradeEvent(base_time + 6000, "BTCUSDT", 150, 5, True),
+                TradeEvent(base_time + 7000, "BTCUSDT", 126, 12, False),
+                TradeEvent(base_time + 8000, "BTCUSDT", 141, 10, False),
+            ]:
+                store.add_trade(event)
+
+            events = [json.loads(line) for line in journal_path.read_text(encoding="utf-8").splitlines()]
+
+        event_types = {event["type"] for event in events}
+        self.assertIn("signal", event_types)
+        self.assertIn("paper_order", event_types)
+        self.assertIn("position_closed", event_types)
 
 
 if __name__ == "__main__":
