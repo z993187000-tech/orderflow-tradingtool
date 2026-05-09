@@ -1,4 +1,6 @@
-from dataclasses import dataclass
+import time
+from collections import deque
+from dataclasses import dataclass, field
 from enum import StrEnum
 
 
@@ -31,6 +33,78 @@ class OrderType(StrEnum):
     MARKET = "MARKET"
     STOP_MARKET = "STOP_MARKET"
     TAKE_PROFIT_MARKET = "TAKE_PROFIT_MARKET"
+
+
+class CircuitBreakerReason(StrEnum):
+    DAILY_LOSS_LIMIT = "daily_loss_limit_reached"
+    MAX_CONSECUTIVE_LOSSES = "max_consecutive_losses_reached"
+    WEBSOCKET_STALE = "websocket_stale"
+    ORDER_PROTECTION_MISSING = "order_protection_missing"
+    POSITION_MISMATCH = "position_mismatch"
+    EXCHANGE_API_FAILURE = "exchange_api_failure"
+
+
+@dataclass(frozen=True)
+class HistoricalWindows:
+    delta_15s: tuple[float, ...] = ()
+    delta_30s: tuple[float, ...] = ()
+    delta_60s: tuple[float, ...] = ()
+    volume_30s: tuple[float, ...] = ()
+    spread_5min: tuple[float, ...] = ()
+    amplitude_1m: tuple[float, ...] = ()
+
+    def mean_delta_30s(self) -> float:
+        if not self.delta_30s:
+            return 0.0
+        return sum(self.delta_30s) / len(self.delta_30s)
+
+    def mean_volume_30s(self) -> float:
+        if not self.volume_30s:
+            return 0.0
+        return sum(self.volume_30s) / len(self.volume_30s)
+
+    def median_spread_5min(self) -> float:
+        if not self.spread_5min:
+            return 0.0
+        return sorted(self.spread_5min)[len(self.spread_5min) // 2]
+
+    def mean_amplitude_1m(self) -> float:
+        if not self.amplitude_1m:
+            return 0.0
+        return sum(self.amplitude_1m) / len(self.amplitude_1m)
+
+    def with_window(self, field: str, value: float, max_len: int = 20) -> "HistoricalWindows":
+        current = getattr(self, field)
+        new_vals = (*current[-max_len + 1:], value) if len(current) >= max_len else (*current, value)
+        return self._replace(**{field: new_vals})
+
+    def _replace(self, **kwargs) -> "HistoricalWindows":
+        return HistoricalWindows(
+            delta_15s=kwargs.get("delta_15s", self.delta_15s),
+            delta_30s=kwargs.get("delta_30s", self.delta_30s),
+            delta_60s=kwargs.get("delta_60s", self.delta_60s),
+            volume_30s=kwargs.get("volume_30s", self.volume_30s),
+            spread_5min=kwargs.get("spread_5min", self.spread_5min),
+            amplitude_1m=kwargs.get("amplitude_1m", self.amplitude_1m),
+        )
+
+
+@dataclass(frozen=True)
+class MarketDataHealth:
+    connection_status: str = "starting"
+    last_event_time: int = 0
+    last_local_time: int = 0
+    latency_ms: int = 0
+    reconnect_count: int = 0
+    symbol: str = ""
+
+    def is_stale(self, websocket_stale_ms: int = 1500, max_data_lag_ms: int = 2000) -> bool:
+        now = int(time.time() * 1000)
+        if self.last_event_time > 0 and now - self.last_event_time > websocket_stale_ms:
+            return True
+        if self.latency_ms > max_data_lag_ms:
+            return True
+        return False
 
 
 @dataclass(frozen=True)
