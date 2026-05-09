@@ -21,6 +21,24 @@ class WebStaticUiTests(unittest.TestCase):
         self.assertIn("drawYAxis", js)
         self.assertIn("formatAxisValue", js)
 
+    def test_summary_metrics_open_mode_split_details(self):
+        html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+        js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn('data-detail="signals"', html)
+        self.assertIn('data-detail="orders"', html)
+        self.assertIn('data-detail="pnl"', html)
+        self.assertIn('id="detailPanel"', html)
+        self.assertIn('data-range="24h"', html)
+        self.assertIn("renderDetailPanel", js)
+        self.assertIn("mode_breakdown", js)
+        self.assertIn("pnl_by_range", js)
+
+    def test_javascript_refreshes_dashboard_automatically(self):
+        js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn("setInterval(loadDashboard", js)
+
 
 if __name__ == "__main__":
     unittest.main()
