@@ -5,7 +5,7 @@ from collections import deque
 from typing import Any
 
 from crypto_perp_tool.config import default_settings
-from crypto_perp_tool.market_data import TradeEvent
+from crypto_perp_tool.market_data import QuoteEvent, TradeEvent
 from crypto_perp_tool.profile import VolumeProfileEngine
 from crypto_perp_tool.web.details import empty_execution_details, mode_breakdown, total_pnl_for_range
 
@@ -16,6 +16,7 @@ class LiveOrderflowStore:
         self.max_events = max_events
         self.display_events = display_events
         self._events: deque[TradeEvent] = deque(maxlen=max_events)
+        self._quote: QuoteEvent | None = None
         self._connection_status = "starting"
         self._connection_message = "waiting for Binance stream"
         self._lock = threading.Lock()
@@ -26,6 +27,12 @@ class LiveOrderflowStore:
         with self._lock:
             self._events.append(event)
 
+    def add_quote(self, event: QuoteEvent) -> None:
+        if event.symbol.upper() != self.symbol:
+            return
+        with self._lock:
+            self._quote = event
+
     def set_connection_status(self, status: str, message: str) -> None:
         with self._lock:
             self._connection_status = status
@@ -34,6 +41,7 @@ class LiveOrderflowStore:
     def view(self) -> dict[str, Any]:
         with self._lock:
             events = list(self._events)
+            quote = self._quote
             connection_status = self._connection_status
             connection_message = self._connection_message
 
@@ -71,6 +79,8 @@ class LiveOrderflowStore:
                 }
             )
 
+        fallback_trade_price = trades[-1]["price"] if trades else None
+        last_price = quote.mid_price if quote is not None else fallback_trade_price
         return {
             "summary": {
                 "source": "binance",
@@ -79,7 +89,10 @@ class LiveOrderflowStore:
                 "connection_message": connection_message,
                 "trade_count": len(trades),
                 "profile_trade_count": len(events),
-                "last_price": trades[-1]["price"] if trades else None,
+                "last_price": last_price,
+                "bid_price": quote.bid_price if quote is not None else None,
+                "ask_price": quote.ask_price if quote is not None else None,
+                "price_source": "bookTicker" if quote is not None else "aggTrade",
                 "cumulative_delta": cumulative_delta,
                 "signals": 0,
                 "orders": 0,
