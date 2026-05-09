@@ -1,6 +1,6 @@
 import unittest
 
-from crypto_perp_tool.market_data import MarkPriceEvent, QuoteEvent, TradeEvent
+from crypto_perp_tool.market_data import MarkPriceEvent, QuoteEvent, SpotPriceEvent, TradeEvent
 from crypto_perp_tool.web.live_store import LiveOrderflowStore
 
 
@@ -44,7 +44,23 @@ class LiveOrderflowStoreTests(unittest.TestCase):
         self.assertEqual(summary["connection_status"], "error")
         self.assertEqual(summary["connection_message"], "Install websockets")
 
-    def test_live_store_uses_latest_trade_as_display_last_price(self):
+    def test_live_store_uses_spot_trade_as_display_last_price(self):
+        store = LiveOrderflowStore(symbol="BTCUSDT", max_events=10)
+
+        store.add_trade(TradeEvent(1000, "BTCUSDT", 100, 1, False))
+        store.add_quote(QuoteEvent(1100, "BTCUSDT", 108, 110))
+        store.add_spot(SpotPriceEvent(1200, "BTCUSDT", 112))
+        summary = store.view()["summary"]
+
+        self.assertEqual(summary["last_price"], 112)
+        self.assertEqual(summary["spot_last_price"], 112)
+        self.assertEqual(summary["last_trade_price"], 100)
+        self.assertEqual(summary["bid_price"], 108)
+        self.assertEqual(summary["ask_price"], 110)
+        self.assertEqual(summary["quote_mid_price"], 109)
+        self.assertEqual(summary["price_source"], "spotTrade")
+
+    def test_live_store_falls_back_to_perp_trade_before_first_spot_trade(self):
         store = LiveOrderflowStore(symbol="BTCUSDT", max_events=10)
 
         store.add_trade(TradeEvent(1000, "BTCUSDT", 100, 1, False))
@@ -52,11 +68,22 @@ class LiveOrderflowStoreTests(unittest.TestCase):
         summary = store.view()["summary"]
 
         self.assertEqual(summary["last_price"], 100)
+        self.assertEqual(summary["spot_last_price"], None)
         self.assertEqual(summary["last_trade_price"], 100)
-        self.assertEqual(summary["bid_price"], 108)
-        self.assertEqual(summary["ask_price"], 110)
-        self.assertEqual(summary["quote_mid_price"], 109)
         self.assertEqual(summary["price_source"], "aggTrade")
+
+    def test_live_store_falls_back_to_index_price_before_perp_trade(self):
+        store = LiveOrderflowStore(symbol="BTCUSDT", max_events=10)
+
+        store.add_trade(TradeEvent(1000, "BTCUSDT", 100, 1, False))
+        store.add_mark(MarkPriceEvent(1200, "BTCUSDT", 111, 112, 0.0001, 1300))
+        summary = store.view()["summary"]
+
+        self.assertEqual(summary["last_price"], 112)
+        self.assertEqual(summary["spot_last_price"], None)
+        self.assertEqual(summary["last_trade_price"], 100)
+        self.assertEqual(summary["index_price"], 112)
+        self.assertEqual(summary["price_source"], "indexPrice")
 
     def test_live_store_falls_back_to_quote_mid_before_first_trade(self):
         store = LiveOrderflowStore(symbol="BTCUSDT", max_events=10)
