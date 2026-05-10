@@ -82,7 +82,7 @@ class PaperRunner:
                     )
                     position = None
 
-            profile.add_trade(event.price, event.quantity, event.timestamp)
+            profile.add_trade(event.price, event.quantity)
             rolling_delta.append(event.delta)
             levels = profile.levels("rolling_4h")
             if not any(level.type == ProfileLevelType.LVN for level in levels):

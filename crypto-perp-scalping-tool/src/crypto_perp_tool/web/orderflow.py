@@ -25,7 +25,7 @@ def build_orderflow_view(data_path: Path | str, symbol: str = "BTCUSDT") -> dict
     delta_series: list[dict[str, Any]] = []
 
     for index, event in enumerate(events):
-        profile.add_trade(event.price, event.quantity, event.timestamp)
+        profile.add_trade(event.price, event.quantity)
         cumulative_delta += event.delta
         trades.append(
             {
