@@ -77,6 +77,25 @@ class VolumeProfileEngineTests(unittest.TestCase):
         poc = next(level for level in levels if level.type == ProfileLevelType.POC)
         self.assertEqual(poc.price, 200)
 
+    def test_evict_before_recalculates_session_extremes(self):
+        engine = VolumeProfileEngine(bin_size=10, value_area_ratio=0.70)
+        old = self.now - 10 * 3600 * 1000
+        engine.add_trade(price=50, quantity=1, timestamp=old)
+        engine.add_trade(price=300, quantity=1, timestamp=old)
+        engine.add_trade(price=150, quantity=1, timestamp=self.now)
+        self.assertEqual(engine.session_high, 300)
+        engine._evict_before(self.now - 6 * 3600 * 1000)
+        self.assertEqual(engine.session_high, 150)
+        self.assertEqual(engine.session_low, 150)
+
+    def test_evict_before_resets_extremes_when_empty(self):
+        engine = VolumeProfileEngine(bin_size=10, value_area_ratio=0.70)
+        old = self.now - 10 * 3600 * 1000
+        engine.add_trade(price=100, quantity=1, timestamp=old)
+        engine._evict_before(self.now - 6 * 3600 * 1000)
+        self.assertIsNone(engine.session_high)
+        self.assertIsNone(engine.session_low)
+
 
 if __name__ == "__main__":
     unittest.main()

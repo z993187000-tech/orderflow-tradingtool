@@ -37,6 +37,13 @@ class VolumeProfileEngine:
 
     def _evict_before(self, cutoff_ms: int) -> None:
         self._trades = [(p, q, ts) for p, q, ts in self._trades if ts >= cutoff_ms]
+        if self._trades:
+            prices = [p for p, _, _ in self._trades]
+            self.session_high = max(prices)
+            self.session_low = min(prices)
+        else:
+            self.session_high = None
+            self.session_low = None
 
     def _window_cutoff(self, window: str) -> int:
         now_ms = int(time.time() * 1000)
