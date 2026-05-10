@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(PYTHONPATH=src python -m unittest tests.unit.test_market_data_health -v)",
+      "Bash(PYTHONPATH=src python -c \"from crypto_perp_tool.web.orderflow import build_orderflow_view; from crypto_perp_tool.paper import PaperRunner; print\\('imports OK'\\)\")",
+      "Bash(PYTHONPATH=src python -m unittest tests.unit.test_live_orderflow_store -v)"
+    ]
+  }
+}
