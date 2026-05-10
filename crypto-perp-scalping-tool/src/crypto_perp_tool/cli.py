@@ -48,6 +48,7 @@ def main(argv: list[str] | None = None) -> int:
     serve_parser.add_argument("--csv", default="data/sample_trades.csv")
     serve_parser.add_argument("--host", default=None)
     serve_parser.add_argument("--port", type=int, default=8000)
+    serve_parser.add_argument("--paper-journal", default="data/live-paper.jsonl")
     serve_parser.add_argument("--mobile", action="store_true", help="Bind to all interfaces and print phone/LAN URLs.")
 
     args = parser.parse_args(argv)
@@ -99,6 +100,7 @@ def main(argv: list[str] | None = None) -> int:
             data_path=Path(args.csv),
             source=args.source,
             symbol=args.symbol,
+            paper_journal_path=Path(args.paper_journal),
         )
         return 0
 

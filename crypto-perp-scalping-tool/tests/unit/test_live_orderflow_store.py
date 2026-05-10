@@ -1,7 +1,56 @@
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
 from crypto_perp_tool.market_data import MarkPriceEvent, QuoteEvent, SpotPriceEvent, TradeEvent
+from crypto_perp_tool.market_data.binance import BinanceInstrumentSpec
+from crypto_perp_tool.types import SignalSide, TradeSignal
 from crypto_perp_tool.web.live_store import LiveOrderflowStore
+
+
+class OneShotSignalEngine:
+    def __init__(self, signal: TradeSignal) -> None:
+        self.signal = signal
+        self.calls = 0
+        self.last_reject_reasons: tuple[str, ...] = ()
+
+    def evaluate(self, snapshot, **kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            return self.signal
+        return None
+
+
+class InvalidStopSignalEngine:
+    last_reject_reasons: tuple[str, ...] = ()
+
+    def evaluate(self, snapshot, **kwargs):
+        return TradeSignal(
+            id="sig-invalid",
+            symbol=snapshot.symbol,
+            side=SignalSide.LONG,
+            setup="test_invalid_stop",
+            entry_price=snapshot.last_price,
+            stop_price=snapshot.last_price,
+            target_price=snapshot.last_price + 10,
+            confidence=0.5,
+            reasons=("test signal",),
+            invalidation_rules=("invalid stop",),
+            created_at=snapshot.local_time,
+        )
+
+
+class CapturingStaleSignalEngine:
+    def __init__(self) -> None:
+        self.last_snapshot = None
+        self.last_reject_reasons: tuple[str, ...] = ()
+
+    def evaluate(self, snapshot, **kwargs):
+        self.last_snapshot = snapshot
+        if snapshot.local_time - snapshot.event_time > 2_000:
+            self.last_reject_reasons = ("data_stale",)
+        return None
 
 
 class LiveOrderflowStoreTests(unittest.TestCase):
@@ -159,6 +208,148 @@ class LiveOrderflowStoreTests(unittest.TestCase):
 
         view = store.view()
         self.assertIsNotNone(view["summary"]["last_price"])
+
+    def test_live_store_uses_time_windows_for_delta_vwap_and_profile(self):
+        store = LiveOrderflowStore(symbol="BTCUSDT", max_events=20)
+        old = TradeEvent(1_000, "BTCUSDT", 100, 500, False)
+        recent = TradeEvent(5 * 60 * 60 * 1000, "BTCUSDT", 200, 1, True)
+
+        store.add_trade(old, received_at=old.timestamp)
+        store.add_trade(recent, received_at=recent.timestamp)
+        view = store.view()
+        poc = next(level for level in view["profile_levels"] if level["type"] == "POC")
+
+        self.assertEqual(view["summary"]["seen_trade_count"], 2)
+        self.assertEqual(view["summary"]["profile_trade_count"], 1)
+        self.assertEqual(view["summary"]["delta_30s"], -1)
+        self.assertEqual(view["summary"]["vwap"], 200)
+        self.assertEqual(poc["price"], 200)
+
+    def test_live_store_uses_received_at_for_stale_data_rejection(self):
+        store = LiveOrderflowStore(symbol="BTCUSDT", max_events=40, enable_signals=True)
+        engine = CapturingStaleSignalEngine()
+        store._signal_engine = engine
+
+        for index in range(30):
+            event = TradeEvent(1_000 + index * 100, "BTCUSDT", 100 + index, 1, False)
+            store.add_trade(event, received_at=event.timestamp + 3_000)
+
+        summary = store.view()["summary"]
+
+        self.assertIsNotNone(engine.last_snapshot)
+        self.assertGreaterEqual(summary["data_lag_ms"], 3_000)
+        self.assertIn("data_stale", summary["reject_reasons"])
+
+    def test_live_paper_journal_records_signal_fill_close_pnl_and_fee_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            journal_path = Path(tmp) / "live-paper.jsonl"
+            signal = TradeSignal(
+                id="sig-live-1",
+                symbol="BTCUSDT",
+                side=SignalSide.LONG,
+                setup="test_lvn",
+                entry_price=100,
+                stop_price=95,
+                target_price=105,
+                confidence=0.8,
+                reasons=("price accepted above LVN", "delta_30s positive"),
+                invalidation_rules=("back below LVN",),
+                created_at=4_000,
+            )
+            store = LiveOrderflowStore(
+                symbol="BTCUSDT",
+                max_events=40,
+                enable_signals=True,
+                journal_path=journal_path,
+            )
+            store._signal_engine = OneShotSignalEngine(signal)
+            store.add_quote(QuoteEvent(3_900, "BTCUSDT", 99.9, 100.1))
+
+            for index in range(30):
+                event = TradeEvent(1_000 + index * 100, "BTCUSDT", 100 + index * 0.01, 1, False)
+                store.add_trade(event, received_at=event.timestamp)
+            store.add_trade(TradeEvent(10_000, "BTCUSDT", 106, 1, False), received_at=10_000)
+
+            rows = [json.loads(line) for line in journal_path.read_text(encoding="utf-8").splitlines()]
+            view = store.view()
+
+        event_types = {row["type"] for row in rows}
+        fill = next(row["payload"] for row in rows if row["type"] == "paper_fill")
+        close = next(row["payload"] for row in rows if row["type"] == "position_closed")
+
+        self.assertTrue({"signal", "risk_decision", "paper_fill", "paper_order", "position_closed", "pnl"} <= event_types)
+        self.assertGreater(fill["fill_price"], 100.1)
+        self.assertIn("slippage_bps", fill)
+        self.assertIn("fee", fill)
+        self.assertIn("net_realized_pnl", close)
+        self.assertEqual(view["summary"]["closed_positions"], 1)
+        self.assertGreater(view["summary"]["realized_pnl"], 0)
+
+    def test_live_paper_fill_uses_exchange_info_tick_and_step_size(self):
+        signal = TradeSignal(
+            id="sig-spec-1",
+            symbol="BTCUSDT",
+            side=SignalSide.LONG,
+            setup="test_spec",
+            entry_price=100,
+            stop_price=95,
+            target_price=105,
+            confidence=0.8,
+            reasons=("test",),
+            invalidation_rules=("stop",),
+            created_at=4_000,
+        )
+        store = LiveOrderflowStore(
+            symbol="BTCUSDT",
+            max_events=40,
+            enable_signals=True,
+            instrument_spec=BinanceInstrumentSpec("BTCUSDT", tick_size=0.5, step_size=0.01, taker_fee_rate=0.0004),
+        )
+        store._signal_engine = OneShotSignalEngine(signal)
+        store.add_quote(QuoteEvent(3_900, "BTCUSDT", 99.9, 100.1))
+
+        for index in range(30):
+            event = TradeEvent(1_000 + index * 100, "BTCUSDT", 100 + index * 0.01, 1, False)
+            store.add_trade(event, received_at=event.timestamp)
+
+        order = store.view()["details"]["paper"]["orders"][0]
+
+        self.assertEqual(order["entry_price"] % 0.5, 0)
+        self.assertEqual(round(order["quantity"] / 0.01), order["quantity"] / 0.01)
+
+    def test_live_paper_journal_records_risk_reject_reason(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            journal_path = Path(tmp) / "live-paper.jsonl"
+            store = LiveOrderflowStore(
+                symbol="BTCUSDT",
+                max_events=40,
+                enable_signals=True,
+                journal_path=journal_path,
+            )
+            store._signal_engine = InvalidStopSignalEngine()
+
+            for index in range(30):
+                event = TradeEvent(1_000 + index * 100, "BTCUSDT", 100, 1, False)
+                store.add_trade(event, received_at=event.timestamp)
+
+            rows = [json.loads(line) for line in journal_path.read_text(encoding="utf-8").splitlines()]
+            reject = next(row["payload"] for row in rows if row["type"] == "signal_rejected")
+
+        self.assertIn("invalid_stop_distance", reject["reject_reasons"])
+        self.assertEqual(store.view()["summary"]["orders"], 0)
+
+    def test_live_store_summary_exposes_operator_context(self):
+        store = LiveOrderflowStore(symbol="BTCUSDT", max_events=10)
+        event = TradeEvent(1_000, "BTCUSDT", 100, 1, False)
+        store.add_trade(event, received_at=1_250)
+
+        summary = store.view()["summary"]
+
+        self.assertIn("open_position", summary)
+        self.assertIn("signal_reasons", summary)
+        self.assertIn("reject_reasons", summary)
+        self.assertEqual(summary["data_lag_ms"], 250)
+        self.assertEqual(summary["last_trade_time"], 1_000)
 
 
 if __name__ == "__main__":

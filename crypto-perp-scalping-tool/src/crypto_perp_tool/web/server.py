@@ -6,7 +6,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from crypto_perp_tool.market_data.binance import BinanceAggTradeClient
+from crypto_perp_tool.market_data.binance import BinanceAggTradeClient, fetch_instrument_spec
 from crypto_perp_tool.web.auth import is_authorized, required_auth_header
 from crypto_perp_tool.web.health import health_payload
 from crypto_perp_tool.web.live_store import LiveOrderflowStore
@@ -98,14 +98,24 @@ def serve_dashboard(
     data_path: Path | str,
     source: str = "csv",
     symbol: str = "BTCUSDT",
+    paper_journal_path: Path | str | None = None,
 ) -> ThreadingHTTPServer:
     live_stores = None
     clients = []
     if source == "binance":
         symbols = tuple(dict.fromkeys([symbol.upper(), "BTCUSDT", "ETHUSDT"]))
         live_stores = {}
+        base_journal_path = Path(paper_journal_path) if paper_journal_path is not None else None
         for live_symbol in symbols:
-            store = LiveOrderflowStore(symbol=live_symbol)
+            symbol_journal_path = (
+                paper_journal_path_for_symbol(base_journal_path, live_symbol) if base_journal_path is not None else None
+            )
+            store = LiveOrderflowStore(
+                symbol=live_symbol,
+                enable_signals=True,
+                journal_path=symbol_journal_path,
+                instrument_spec=fetch_instrument_spec(live_symbol),
+            )
             live_stores[live_symbol] = store
             client = BinanceAggTradeClient(
                 symbol=live_symbol,
@@ -130,6 +140,13 @@ def serve_dashboard(
         for client in clients:
             client.stop()
     return server
+
+
+def paper_journal_path_for_symbol(base_path: Path | str, symbol: str) -> Path:
+    base_path = Path(base_path)
+    suffix = base_path.suffix or ".jsonl"
+    stem = base_path.stem if base_path.suffix else base_path.name
+    return base_path.with_name(f"{stem}-{symbol.lower()}{suffix}")
 
 
 def _content_type(path: Path) -> str:

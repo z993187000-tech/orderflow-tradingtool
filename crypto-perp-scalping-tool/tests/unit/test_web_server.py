@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from crypto_perp_tool.web.server import create_app_handler
+from crypto_perp_tool.web.server import create_app_handler, paper_journal_path_for_symbol
 from crypto_perp_tool.web.live_store import LiveOrderflowStore
 
 
@@ -50,6 +50,16 @@ class WebServerTests(unittest.TestCase):
         )
 
         self.assertTrue(callable(handler))
+
+    def test_symbol_specific_paper_journal_paths_do_not_collide(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base_path = Path(tmp) / "live-paper.jsonl"
+            btc_path = paper_journal_path_for_symbol(base_path, "BTCUSDT")
+            eth_path = paper_journal_path_for_symbol(base_path, "ETHUSDT")
+
+        self.assertEqual(btc_path.name, "live-paper-btcusdt.jsonl")
+        self.assertEqual(eth_path.name, "live-paper-ethusdt.jsonl")
+        self.assertNotEqual(btc_path, eth_path)
 
 
 if __name__ == "__main__":

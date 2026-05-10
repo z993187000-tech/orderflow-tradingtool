@@ -6,8 +6,20 @@ import threading
 import time
 from dataclasses import dataclass
 from typing import Callable
+from urllib.request import urlopen
 
 from crypto_perp_tool.market_data.events import MarkPriceEvent, QuoteEvent, SpotPriceEvent, TradeEvent
+
+
+_INSTRUMENT_SPEC_CACHE: dict[str, "BinanceInstrumentSpec"] = {}
+
+
+@dataclass(frozen=True)
+class BinanceInstrumentSpec:
+    symbol: str
+    tick_size: float
+    step_size: float
+    taker_fee_rate: float = 0.0004
 
 
 @dataclass(frozen=True)
@@ -83,6 +95,68 @@ class BinanceSpotTradeParser:
             symbol=str(payload["s"]).upper(),
             price=float(payload["p"]),
         )
+
+
+class BinanceExchangeInfoParser:
+    def parse_symbol(self, payload: dict, symbol: str) -> BinanceInstrumentSpec:
+        symbol = symbol.upper()
+        symbol_info = next((item for item in payload.get("symbols", []) if item.get("symbol") == symbol), None)
+        if symbol_info is None:
+            raise ValueError(f"symbol not found in exchangeInfo: {symbol}")
+
+        filters = {item.get("filterType"): item for item in symbol_info.get("filters", [])}
+        price_filter = filters.get("PRICE_FILTER")
+        lot_size = filters.get("LOT_SIZE")
+        if price_filter is None or lot_size is None:
+            raise ValueError(f"missing PRICE_FILTER or LOT_SIZE for symbol: {symbol}")
+
+        tick_size = float(price_filter["tickSize"])
+        step_size = float(lot_size["stepSize"])
+        if tick_size <= 0 or step_size <= 0:
+            raise ValueError(f"invalid tickSize or stepSize for symbol: {symbol}")
+        return BinanceInstrumentSpec(symbol=symbol, tick_size=tick_size, step_size=step_size)
+
+
+class BinanceExchangeInfoClient:
+    def __init__(
+        self,
+        url: str = "https://fapi.binance.com/fapi/v1/exchangeInfo",
+        timeout_seconds: float = 5.0,
+        loader: Callable[[str, float], dict] | None = None,
+    ) -> None:
+        self.url = url
+        self.timeout_seconds = timeout_seconds
+        self.loader = loader or self._load_json
+        self.parser = BinanceExchangeInfoParser()
+
+    def fetch_symbol(self, symbol: str) -> BinanceInstrumentSpec:
+        payload = self.loader(self.url, self.timeout_seconds)
+        return self.parser.parse_symbol(payload, symbol)
+
+    def _load_json(self, url: str, timeout: float) -> dict:
+        with urlopen(url, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+
+def default_instrument_spec(symbol: str) -> BinanceInstrumentSpec:
+    symbol = symbol.upper()
+    if symbol == "BTCUSDT":
+        return BinanceInstrumentSpec(symbol=symbol, tick_size=0.1, step_size=0.001)
+    if symbol == "ETHUSDT":
+        return BinanceInstrumentSpec(symbol=symbol, tick_size=0.01, step_size=0.001)
+    return BinanceInstrumentSpec(symbol=symbol, tick_size=0.01, step_size=0.001)
+
+
+def fetch_instrument_spec(symbol: str) -> BinanceInstrumentSpec:
+    symbol = symbol.upper()
+    if symbol in _INSTRUMENT_SPEC_CACHE:
+        return _INSTRUMENT_SPEC_CACHE[symbol]
+    try:
+        spec = BinanceExchangeInfoClient().fetch_symbol(symbol)
+    except Exception:
+        spec = default_instrument_spec(symbol)
+    _INSTRUMENT_SPEC_CACHE[symbol] = spec
+    return spec
 
 
 class BinanceAggTradeClient:

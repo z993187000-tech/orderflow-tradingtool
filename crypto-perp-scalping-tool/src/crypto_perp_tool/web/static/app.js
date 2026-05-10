@@ -12,6 +12,12 @@ const els = {
   closedSplit: document.getElementById("closedSplit"),
   pnl: document.getElementById("pnl"),
   pnlSplit: document.getElementById("pnlSplit"),
+  currentPosition: document.getElementById("currentPosition"),
+  currentPositionMeta: document.getElementById("currentPositionMeta"),
+  signalReasons: document.getElementById("signalReasons"),
+  rejectReasons: document.getElementById("rejectReasons"),
+  dataLag: document.getElementById("dataLag"),
+  lastTradeTime: document.getElementById("lastTradeTime"),
   connection: document.getElementById("connection"),
   sourceLabel: document.getElementById("sourceLabel"),
   tradeCount: document.getElementById("tradeCount"),
@@ -82,9 +88,7 @@ async function loadDashboard() {
 function renderSummary(summary) {
   const breakdown = summary.mode_breakdown || emptyBreakdown();
   els.lastPrice.textContent = formatNumber(summary.last_price);
-  els.lastPrice.title = summary.price_source
-    ? `price source: ${summary.price_source}`
-    : "";
+  els.lastPrice.title = summary.price_source ? `price source: ${summary.price_source}` : "";
   els.lastPriceMeta.textContent = `Perp ${formatNumber(summary.last_trade_price)} / Mark ${formatNumber(summary.mark_price)} / Index ${formatNumber(summary.index_price)} / Mid ${formatNumber(summary.quote_mid_price)}`;
   els.lastPriceMeta.title = `Spot ${formatNumber(summary.spot_last_price)} / Bid ${formatNumber(summary.bid_price)} / Ask ${formatNumber(summary.ask_price)}`;
   els.cumDelta.textContent = formatNumber(summary.cumulative_delta);
@@ -97,6 +101,11 @@ function renderSummary(summary) {
   els.pnl.textContent = formatNumber(summary.pnl_24h);
   els.pnl.className = summary.pnl_24h >= 0 ? "buy" : "sell";
   els.pnlSplit.textContent = `模拟 ${formatNumber(breakdown.paper.pnl_24h)} / 实盘 ${formatNumber(breakdown.live.pnl_24h)}`;
+  renderPosition(summary.open_position);
+  els.signalReasons.textContent = reasonText(summary.signal_reasons);
+  els.rejectReasons.textContent = reasonText(summary.reject_reasons);
+  els.dataLag.textContent = `${formatNumber(summary.data_lag_ms)} ms`;
+  els.lastTradeTime.textContent = formatTimestamp(summary.last_trade_time);
   els.connection.textContent = summary.connection_status || summary.source || "csv";
   els.connection.title = summary.connection_message || "";
   els.sourceLabel.textContent = summary.source === "binance"
@@ -105,6 +114,18 @@ function renderSummary(summary) {
   els.tradeCount.textContent = summary.profile_trade_count
     ? `${summary.trade_count} shown / ${summary.profile_trade_count} profiled`
     : `${summary.trade_count} trades`;
+}
+
+function renderPosition(position) {
+  if (!position) {
+    els.currentPosition.textContent = "flat";
+    els.currentPositionMeta.textContent = "无持仓";
+    els.currentPosition.className = "";
+    return;
+  }
+  els.currentPosition.textContent = `${position.side} ${formatNumber(position.quantity)}`;
+  els.currentPosition.className = position.side === "long" ? "buy" : "sell";
+  els.currentPositionMeta.textContent = `Entry ${formatNumber(position.entry_price)} / SL ${formatNumber(position.stop_price)} / TP ${formatNumber(position.target_price)}`;
 }
 
 function renderDetailPanel() {
@@ -140,22 +161,23 @@ function renderRecordTable(kind, records) {
 }
 
 function recordHeader(kind) {
-  if (kind === "signals") return "<thead><tr><th>Time / 时间</th><th>Side / 方向</th><th>Setup / 形态</th><th>Entry / 入场</th></tr></thead>";
-  if (kind === "orders") return "<thead><tr><th>Time / 时间</th><th>Side / 方向</th><th>Qty / 数量</th><th>Entry / 入场</th></tr></thead>";
+  if (kind === "signals") return "<thead><tr><th>Time / 时间</th><th>Side / 方向</th><th>Setup / 形态</th><th>Entry / 入场</th><th>Reasons / 原因</th></tr></thead>";
+  if (kind === "orders") return "<thead><tr><th>Time / 时间</th><th>Side / 方向</th><th>Qty / 数量</th><th>Entry / 入场</th><th>Stop / 止损</th><th>Target / 止盈</th><th>Fee / 手续费</th></tr></thead>";
   if (kind === "closed_positions") return "<thead><tr><th>Time / 时间</th><th>Side / 方向</th><th>Entry / 入场</th><th>Close / 平仓</th><th>PnL / 盈亏</th></tr></thead>";
   return "<thead><tr><th>Time / 时间</th><th>Side / 方向</th><th>PnL / 盈亏</th></tr></thead>";
 }
 
 function recordRow(kind, record) {
   if (kind === "signals") {
-    return `<tr><td>${formatTimestamp(record.timestamp)}</td><td>${record.side || "--"}</td><td>${record.setup || "--"}</td><td>${formatNumber(record.entry_price)}</td></tr>`;
+    return `<tr><td>${formatTimestamp(record.timestamp)}</td><td>${record.side || "--"}</td><td>${record.setup || "--"}</td><td>${formatNumber(record.entry_price)}</td><td>${reasonText(record.reasons)}</td></tr>`;
   }
   if (kind === "orders") {
-    return `<tr><td>${formatTimestamp(record.timestamp)}</td><td>${record.side || "--"}</td><td>${formatNumber(record.quantity)}</td><td>${formatNumber(record.entry_price)}</td></tr>`;
+    return `<tr><td>${formatTimestamp(record.timestamp)}</td><td>${record.side || "--"}</td><td>${formatNumber(record.quantity)}</td><td>${formatNumber(record.entry_price)}</td><td>${formatNumber(record.stop_price)}</td><td>${formatNumber(record.target_price)}</td><td>${formatNumber(record.fee)}</td></tr>`;
   }
   if (kind === "closed_positions") {
-    const pnlClass = record.realized_pnl >= 0 ? "buy" : "sell";
-    return `<tr><td>${formatTimestamp(record.timestamp)}</td><td>${record.side || "--"}</td><td>${formatNumber(record.entry_price)}</td><td>${formatNumber(record.close_price)}</td><td class="${pnlClass}">${formatNumber(record.realized_pnl)}</td></tr>`;
+    const pnl = record.net_realized_pnl ?? record.realized_pnl;
+    const pnlClass = pnl >= 0 ? "buy" : "sell";
+    return `<tr><td>${formatTimestamp(record.timestamp)}</td><td>${record.side || "--"}</td><td>${formatNumber(record.entry_price)}</td><td>${formatNumber(record.close_price)}</td><td class="${pnlClass}">${formatNumber(pnl)}</td></tr>`;
   }
   const pnlClass = record.realized_pnl >= 0 ? "buy" : "sell";
   return `<tr><td>${formatTimestamp(record.timestamp)}</td><td>${record.side || "--"}</td><td class="${pnlClass}">${formatNumber(record.realized_pnl)}</td></tr>`;
@@ -180,7 +202,7 @@ function drawPrice(canvas, trades, markers) {
   ctx.stroke();
 
   markers.forEach(marker => {
-    const x = scale.x(marker.index, trades.length);
+    const x = scale.x(marker.index ?? 0, trades.length);
     const y = scale.y(marker.price);
     ctx.fillStyle = marker.type === "signal" ? colors.warn : colors.buy;
     ctx.beginPath();
@@ -219,13 +241,7 @@ function drawDelta(canvas, series) {
 
 function renderProfile(levels) {
   const maxStrength = Math.max(...levels.map(level => level.strength), 1);
-  const colorFor = {
-    POC: colors.warn,
-    HVN: colors.buy,
-    LVN: colors.sell,
-    VAH: colors.price,
-    VAL: colors.price
-  };
+  const colorFor = { POC: colors.warn, HVN: colors.buy, LVN: colors.sell, VAH: colors.price, VAL: colors.price };
   els.profile.innerHTML = levels
     .sort((a, b) => b.price - a.price)
     .map(level => {
@@ -244,7 +260,7 @@ function renderTape(trades) {
   els.tape.innerHTML = trades.map(trade => {
     const klass = trade.side === "buy" ? "buy" : "sell";
     return `<tr>
-      <td>${trade.timestamp}</td>
+      <td>${formatTapeTimestamp(trade.timestamp)}</td>
       <td class="${klass}">${trade.side}</td>
       <td>${formatNumber(trade.price)}</td>
       <td>${formatNumber(trade.quantity)}</td>
@@ -302,6 +318,11 @@ function splitLabel(breakdown, key) {
   return `模拟 ${formatNumber(breakdown.paper[key])} / 实盘 ${formatNumber(breakdown.live[key])}`;
 }
 
+function reasonText(reasons) {
+  if (!reasons || !reasons.length) return "--";
+  return Array.isArray(reasons) ? reasons.join(" / ") : String(reasons);
+}
+
 function emptyBreakdown() {
   return {
     paper: { signals: 0, orders: 0, closed_positions: 0, pnl_24h: 0 },
@@ -324,6 +345,13 @@ function formatTimestamp(value) {
   const number = Number(value);
   if (number < 946684800000) return number.toString();
   return new Date(number).toLocaleString();
+}
+
+function formatTapeTimestamp(value) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return "--";
+  const number = Number(value);
+  if (number < 946684800000) return number.toString();
+  return new Date(number).toLocaleTimeString(undefined, { hour12: false });
 }
 
 function formatAxisValue(value) {

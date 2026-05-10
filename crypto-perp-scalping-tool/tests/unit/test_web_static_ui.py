@@ -58,6 +58,28 @@ class WebStaticUiTests(unittest.TestCase):
         self.assertIn("index_price", js)
         self.assertIn("last_trade_price", js)
 
+    def test_summary_shows_paper_operator_context(self):
+        html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+        js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+
+        for element_id in ["currentPosition", "signalReasons", "rejectReasons", "dataLag", "lastTradeTime"]:
+            self.assertIn(f'id="{element_id}"', html)
+            self.assertIn(element_id, js)
+
+        self.assertIn("open_position", js)
+        self.assertIn("signal_reasons", js)
+        self.assertIn("reject_reasons", js)
+        self.assertIn("data_lag_ms", js)
+        self.assertIn("last_trade_time", js)
+
+    def test_static_dashboard_text_is_not_mojibake(self):
+        text = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+        text += (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+
+        self.assertNotIn("妯℃嫙", text)
+        self.assertNotIn("瀹炵洏", text)
+        self.assertNotIn("鏃堕棿", text)
+
 
 if __name__ == "__main__":
     unittest.main()

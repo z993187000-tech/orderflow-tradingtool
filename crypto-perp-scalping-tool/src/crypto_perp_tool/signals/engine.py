@@ -18,6 +18,7 @@ class SignalEngine:
         self.min_reward_risk = min_reward_risk
         self.max_data_lag_ms = max_data_lag_ms
         self._price_memory: deque[tuple[int, float]] = deque(maxlen=120)
+        self.last_reject_reasons: tuple[str, ...] = ()
 
     def evaluate(
         self,
@@ -30,16 +31,19 @@ class SignalEngine:
     ) -> TradeSignal | None:
         forbidden = self._check_forbidden(snapshot, windows, health, circuit_tripped, has_position, next_funding_time)
         if forbidden:
+            self.last_reject_reasons = tuple(forbidden)
             return None
 
         self._price_memory.append((snapshot.local_time, snapshot.last_price))
 
-        return (
+        signal = (
             self._setup_lvn_acceptance(snapshot, windows)
             or self._setup_lvn_breakdown(snapshot, windows)
             or self._setup_hvn_val_failed_breakdown(snapshot)
             or self._setup_hvn_vah_failed_breakout(snapshot)
         )
+        self.last_reject_reasons = () if signal is not None else ("no_setup",)
+        return signal
 
     # --- forbidden conditions ---
 

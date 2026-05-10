@@ -4,9 +4,13 @@ from crypto_perp_tool.market_data.binance import (
     BinanceAggTradeClient,
     BinanceAggTradeParser,
     BinanceBookTickerParser,
+    BinanceExchangeInfoClient,
+    BinanceExchangeInfoParser,
     BinanceMarkPriceParser,
     BinanceSpotTradeParser,
     BinanceStreamConfig,
+    _INSTRUMENT_SPEC_CACHE,
+    fetch_instrument_spec,
 )
 
 
@@ -119,6 +123,73 @@ class BinanceMarketDataTests(unittest.TestCase):
         client._report_status("connecting", "test")
 
         self.assertEqual(statuses, [("connecting", "test")])
+
+    def test_exchange_info_parser_extracts_tick_and_step_size(self):
+        payload = {
+            "symbols": [
+                {
+                    "symbol": "BTCUSDT",
+                    "filters": [
+                        {"filterType": "PRICE_FILTER", "tickSize": "0.10"},
+                        {"filterType": "LOT_SIZE", "stepSize": "0.001"},
+                    ],
+                }
+            ]
+        }
+
+        spec = BinanceExchangeInfoParser().parse_symbol(payload, "BTCUSDT")
+
+        self.assertEqual(spec.symbol, "BTCUSDT")
+        self.assertEqual(spec.tick_size, 0.1)
+        self.assertEqual(spec.step_size, 0.001)
+        self.assertEqual(spec.taker_fee_rate, 0.0004)
+
+    def test_exchange_info_client_uses_usdm_futures_endpoint(self):
+        requested = []
+
+        def fake_loader(url: str, timeout: float):
+            requested.append((url, timeout))
+            return {
+                "symbols": [
+                    {
+                        "symbol": "ETHUSDT",
+                        "filters": [
+                            {"filterType": "PRICE_FILTER", "tickSize": "0.01"},
+                            {"filterType": "LOT_SIZE", "stepSize": "0.001"},
+                        ],
+                    }
+                ]
+            }
+
+        client = BinanceExchangeInfoClient(loader=fake_loader, timeout_seconds=7)
+        spec = client.fetch_symbol("ETHUSDT")
+
+        self.assertEqual(requested, [("https://fapi.binance.com/fapi/v1/exchangeInfo", 7)])
+        self.assertEqual(spec.tick_size, 0.01)
+        self.assertEqual(spec.step_size, 0.001)
+
+    def test_fetch_instrument_spec_uses_cache(self):
+        _INSTRUMENT_SPEC_CACHE.clear()
+        _INSTRUMENT_SPEC_CACHE["BTCUSDT"] = BinanceExchangeInfoParser().parse_symbol(
+            {
+                "symbols": [
+                    {
+                        "symbol": "BTCUSDT",
+                        "filters": [
+                            {"filterType": "PRICE_FILTER", "tickSize": "0.50"},
+                            {"filterType": "LOT_SIZE", "stepSize": "0.010"},
+                        ],
+                    }
+                ]
+            },
+            "BTCUSDT",
+        )
+
+        spec = fetch_instrument_spec("BTCUSDT")
+
+        self.assertEqual(spec.tick_size, 0.5)
+        self.assertEqual(spec.step_size, 0.01)
+        _INSTRUMENT_SPEC_CACHE.clear()
 
 
 if __name__ == "__main__":
