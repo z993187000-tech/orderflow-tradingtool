@@ -129,6 +129,37 @@ class LiveOrderflowStoreTests(unittest.TestCase):
         self.assertEqual(poc["price"], 100)
         self.assertEqual(view["summary"]["profile_trade_count"], 600)
 
+    def test_live_store_runs_signal_engine_and_produces_signals(self):
+        store = LiveOrderflowStore(symbol="BTCUSDT", max_events=600, enable_signals=True)
+        store.add_quote(QuoteEvent(1000, "BTCUSDT", 99, 101))
+        for price in [101.0, 101.5, 102.0, 102.5, 101.8, 102.2, 102.8, 103.5, 104.0, 104.5,
+                       105.0, 104.8, 105.5, 106.0, 106.5, 105.8, 107.0, 106.2, 106.8, 107.5,
+                       108.0, 107.5, 108.5, 109.0, 108.2, 108.8, 109.5, 110.0, 109.8, 110.5]:
+            store.add_trade(TradeEvent(1000 + len(store._events) * 100, "BTCUSDT", price, 1.0, False))
+
+        view = store.view()
+        self.assertGreaterEqual(view["summary"]["signals"], 0)
+        self.assertIn("mode_breakdown", view["summary"])
+
+    def test_live_store_maintains_persistent_profile_engine(self):
+        store = LiveOrderflowStore(symbol="BTCUSDT", max_events=10)
+
+        store.add_trade(TradeEvent(1000, "BTCUSDT", 100, 5, True))
+        store.add_trade(TradeEvent(2000, "BTCUSDT", 110, 20, False))
+        view1 = store.view()
+        store.add_trade(TradeEvent(3000, "BTCUSDT", 120, 3, True))
+        view2 = store.view()
+
+        self.assertLess(view1["summary"]["profile_trade_count"], view2["summary"]["profile_trade_count"])
+
+    def test_live_store_handles_signal_engine_without_quote(self):
+        store = LiveOrderflowStore(symbol="BTCUSDT", max_events=600, enable_signals=True)
+        for price in [200.0, 200.5, 201.0, 201.5, 200.8, 201.2, 201.8, 202.5, 203.0, 203.5]:
+            store.add_trade(TradeEvent(1000 + len(store._events) * 100, "BTCUSDT", price, 1.0, False))
+
+        view = store.view()
+        self.assertIsNotNone(view["summary"]["last_price"])
+
 
 if __name__ == "__main__":
     unittest.main()
