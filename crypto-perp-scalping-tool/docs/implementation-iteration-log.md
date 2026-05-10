@@ -213,3 +213,57 @@
 - 新增 LAN IP 探测。
 - 启动时打印 `Local` 和 `Phone/LAN` URL。
 - 文档补充 Windows 防火墙和同一 Wi-Fi 要求。
+
+## Iteration 8：Live Paper Auto Trading Loop
+
+### Issue AA：Live Web 只有行情观察，没有自动 paper 交易闭环
+
+解决：
+
+- 新增 `PaperTradingEngine`，实时消费 Binance futures `aggTrade`。
+- 每笔成交都会更新 profile、delta、VWAP，并调用 `SignalEngine` 和 `RiskEngine`。
+- 风控通过后立即创建 paper order 和 open position。
+- 后续成交触发 stop/target 时自动记录 closed position 和 realized PnL。
+
+### Issue AB：Web 顶部 paper 指标仍是占位值
+
+解决：
+
+- `LiveOrderflowStore` 为每个 symbol 持有独立 paper engine。
+- `/api/orderflow` 的 Signals、Orders、Closed、Paper PnL、details 和 markers 来自实时 paper engine。
+- Price And Execution 图表显示 signal marker 和 position close marker。
+
+### Issue AC：Recent Tape 时间戳不可读，订单明细缺少止损止盈
+
+解决：
+
+- Recent Tape 的毫秒时间戳格式化为可读时间。
+- Orders 明细表新增 Stop / 止损 与 Target / 止盈列。
+- Orders 卡片在有 open paper position 时显示当前入场、止损、止盈。
+
+## Iteration 9：收敛实时 paper 交易基础问题
+
+### Issue AD：profile 和 Delta 使用交易笔数窗口，不能代表真实时间窗口
+
+解决：
+
+- `PaperTradingEngine` 改为按毫秒时间窗口计算 rolling profile、VWAP、15s/30s/60s Delta。
+- `LiveOrderflowStore` 的 Volume Profile 使用配置里的 rolling minutes，而不是全部已缓存成交。
+- summary 暴露 `seen_trade_count` 和 `profile_trade_count`，便于检查窗口是否被异常压缩。
+
+### Issue AE：实时数据延迟风控被事件时间绕过
+
+解决：
+
+- `process_trade()` 新增 `received_at`，实盘默认使用本机接收时间。
+- `MarketSnapshot.local_time` 使用接收时间，`event_time` 使用交易所事件时间。
+- `data_lag_ms` 进入 summary，延迟超限时信号会被拒绝。
+
+### Issue AF：Zeabur/Web live paper 交易没有落盘和恢复
+
+解决：
+
+- `PaperTradingEngine` 支持 `journal_path`，写入 signal、risk decision、paper fill、paper order 和 position close。
+- `LiveOrderflowStore`、`serve_dashboard`、CLI 与 Dockerfile 接入 `--paper-journal` / `PAPER_JOURNAL`。
+- BTCUSDT 与 ETHUSDT journal 自动拆分为独立 jsonl 文件，避免多 symbol 混写。
+- 服务重启时从 journal 恢复 paper orders、open position、closed position、realized PnL 和 markers。

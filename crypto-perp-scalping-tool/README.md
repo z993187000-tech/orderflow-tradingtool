@@ -23,7 +23,7 @@ tests/                  Unit tests for the implementation contracts
 
 ## Interaction And Deployment
 
-The short-term operator interface is a Telegram Bot for status, alerts, paper-trading control, signal inspection, and journal lookup. The Web Dashboard comes later for charts, volume profile visualization, replay, and reporting.
+The short-term operator interface starts with a mobile-friendly Web Dashboard for live order-flow observation and automatic paper trading. Telegram Bot control remains planned for status, alerts, paper-trading control, signal inspection, and journal lookup.
 
 Early deployments can run on Zeabur for Telegram Bot, paper-trading worker, database services, and the later Web Dashboard. Live trading core should eventually move to a more controlled VPS or cloud server with fixed IP, stronger process supervision, and independent monitoring.
 
@@ -31,7 +31,7 @@ Early deployments can run on Zeabur for Telegram Bot, paper-trading worker, data
 
 ```powershell
 $env:PYTHONPATH='src'
-python -m crypto_perp_tool.cli web serve --source binance --symbol BTCUSDT --port 8000
+python -m crypto_perp_tool.cli web serve --source binance --symbol BTCUSDT --port 8000 --paper-journal data/live-paper.jsonl
 ```
 
 Then open `http://127.0.0.1:8000`.
