@@ -12,7 +12,7 @@ class OrderflowViewTests(unittest.TestCase):
         view = build_orderflow_view(PROJECT_ROOT / "data" / "sample_trades.csv")
 
         self.assertEqual(view["summary"]["symbol"], "BTCUSDT")
-        self.assertEqual(view["summary"]["trade_count"], 8)
+        self.assertEqual(view["summary"]["trade_count"], 60)
         self.assertGreaterEqual(view["summary"]["signals"], 1)
         self.assertGreaterEqual(view["summary"]["orders"], 1)
         self.assertGreaterEqual(view["summary"]["closed_positions"], 1)
@@ -46,6 +46,19 @@ class OrderflowViewTests(unittest.TestCase):
         self.assertGreater(paper["pnl_by_range"]["all"], 0)
         self.assertEqual(live["pnl_by_range"]["24h"], 0)
         self.assertEqual(view["summary"]["pnl_24h"], paper["pnl_by_range"]["24h"])
+
+    def test_build_orderflow_view_exposes_strategy_state_fields(self):
+        view = build_orderflow_view(PROJECT_ROOT / "data" / "sample_trades.csv")
+        summary = view["summary"]
+
+        self.assertIn("atr_1m_14", summary)
+        self.assertIn("atr_3m_14", summary)
+        self.assertIn("last_aggression_bubble", summary)
+        self.assertIn("last_break_even_shift", summary)
+        self.assertIn("last_absorption_reduce", summary)
+        self.assertIn("cvd_divergence", summary)
+        self.assertIn("state", summary["cvd_divergence"])
+        self.assertTrue(any(marker["type"] == "aggression_bubble" for marker in view["markers"]))
 
 
 if __name__ == "__main__":

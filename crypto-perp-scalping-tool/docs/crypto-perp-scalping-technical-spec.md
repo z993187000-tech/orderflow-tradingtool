@@ -1,4 +1,4 @@
-# 加密永续剥头皮全自动交易工具技术规格
+# 加密永续剥头皮全自动交易工具技术规范
 
 ## 1. 文档目标与来源
 
@@ -69,7 +69,9 @@
 - Buy volume / sell volume
 - Delta = aggressive buy volume - aggressive sell volume
 - Cumulative Delta
+- Aggression Bubble：单笔 `aggTrade` 数量 >= 10 BTC 记为 `large`，>= 50 BTC 记为 `block`；方向由 `isBuyerMaker` 推导。
 - VWAP
+- ATR_1m_14 / ATR_3m_14：由真实 1m / 3m 成交聚合 K 线计算，用于动态止损和吸收判断。
 - Session high / low
 - Asia / London / New York 时段高低点
 - Session volume profile
@@ -219,7 +221,35 @@ Level strength：
 - 上冲 Delta 很强但价格不再延续，随后负 Delta 翻转。
 - 目标为 VWAP、POC 或区间下沿。
 
-### 5.5 禁止交易条件
+### 5.5 Trend Squeeze：VAH/VAL 突破 -> LVN 回踩 -> 攻击性气泡
+
+用途：趋势时段不追突破第一脚，等待价格回踩到突破方向上的 LVN，再用大单主动成交确认延续。
+
+Long 触发条件：
+
+- 最近 90s 内价格突破 VAH 上沿。
+- 当前价格回踩到 VAH 上方的 LVN 区间内。
+- 当前成交出现买方 Aggression Bubble：单笔 >= 10 BTC，>= 50 BTC 记为 block 级别。
+- 最近 30s Delta 为正。
+- 目标为上方最近 POC / HVN / VAH / VAL。
+- 止损放在大单价格后方，并叠加 ATR_1m_14 / ATR_3m_14 缓冲。
+
+Short 与 Long 对称：最近 90s 跌破 VAL，下方 LVN 回踩，出现卖方 Aggression Bubble，目标为下方最近高价值节点。
+
+### 5.6 CVD 背离假突破
+
+用途：区间或低波动时段识别“价格刺破但订单流没有跟随”的失败拍卖。
+
+Bearish 条件：
+
+- 价格短暂突破 VAH 上沿后重新回到价值区内部。
+- 突破阶段价格创新高，但 CVD 没有同步创新高。
+- 回收时最近 30s Delta 转负。
+- 目标优先看 POC，其次看下方最近 HVN / VAL。
+
+Bullish 条件与 Bearish 对称：价格跌破 VAL 后回到价值区内部，价格创新低但 CVD 没有同步创新低，回收时 Delta 转正，目标优先看 POC。
+
+### 5.7 禁止交易条件
 
 任一条件满足时禁止开新仓：
 
@@ -245,6 +275,12 @@ Level strength：
 - 最大允许滑点：BTC 0.03%，ETH 0.04%。
 
 所有风险参数必须由 Risk Engine 最终裁决，Signal Engine 只能提出建议。
+
+### 6.1.1 动态保护
+
+- 动态止损：新趋势挤压信号使用真实 1m / 3m ATR 作为缓冲，止损放在攻击性大单价格后方，而不是固定百分比。
+- Break-even shift：开仓后价格向有利方向运行超过 1.5R，自动把止损移动到开仓均价。
+- Absorption protection：若持仓方向 CVD/Delta 激增，但价格位移不超过 ATR，判定为主动单撞到被动流动性，paper engine 执行强制减仓并记录 `absorption_reduce`。
 
 ### 6.2 仓位计算
 
@@ -356,9 +392,17 @@ type MarketSnapshot = {
   spreadBps: number;
   vwap: number;
   atr1m14: number;
+  atr3m14: number;
   delta15s: number;
   delta30s: number;
   delta60s: number;
+  cumulativeDelta: number;
+  aggressionBubble?: {
+    side: "buy" | "sell";
+    quantity: number;
+    tier: "large" | "block";
+    price: number;
+  };
   volume30s: number;
   session: TradingSessionState;
   profileLevels: ProfileLevel[];
@@ -392,7 +436,11 @@ type TradeSignal = {
     | "lvn_break_acceptance"
     | "lvn_breakdown_acceptance"
     | "hvn_val_failed_breakdown"
-    | "hvn_vah_failed_breakout";
+    | "hvn_vah_failed_breakout"
+    | "vah_breakout_lvn_pullback_aggression"
+    | "val_breakdown_lvn_pullback_aggression"
+    | "cvd_divergence_failed_breakout"
+    | "cvd_divergence_failed_breakdown";
   entryPrice: number;
   stopPrice: number;
   targetPrice: number;
@@ -583,7 +631,7 @@ MVP 包含：
 - BTCUSDT / ETHUSDT 数据接入。
 - Session + rolling volume profile。
 - VWAP、Delta、HVN/LVN、VAH/VAL、POC。
-- 四个 setup 的信号判断。
+- LVN 接受、HVN/VAH/VAL 假突破回收、Trend Squeeze、CVD 背离假突破等 setup 的信号判断。
 - Paper trading execution。
 - Risk Engine 与熔断。
 - Journal。
@@ -684,6 +732,9 @@ signals:
     - 30
     - 60
   funding_blackout_minutes: 2
+  aggression_large_threshold: 10
+  aggression_block_threshold: 50
+  atr_period: 14
 ```
 
 ## 16. 开发顺序

@@ -5,21 +5,41 @@ import threading
 import time
 from collections import deque
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 from crypto_perp_tool.config import default_settings
 from crypto_perp_tool.journal import JsonlJournal
-from crypto_perp_tool.market_data import MarkPriceEvent, QuoteEvent, SpotPriceEvent, TimeWindowBuffer, TradeEvent
+from crypto_perp_tool.market_data import (
+    AggressionBubble,
+    AggressionBubbleDetector,
+    AtrTracker,
+    FlashCrashDetector,
+    ForceOrderEvent,
+    MarkPriceEvent,
+    QuoteEvent,
+    SpotPriceEvent,
+    TimeWindowBuffer,
+    TradeEvent,
+)
 from crypto_perp_tool.market_data.binance import BinanceInstrumentSpec, default_instrument_spec
 from crypto_perp_tool.market_data.health import compute_health
 from crypto_perp_tool.profile import VolumeProfileEngine
 from crypto_perp_tool.risk import AccountState, RiskEngine
 from crypto_perp_tool.risk.circuit import CircuitBreaker
 from crypto_perp_tool.serialization import to_jsonable
+from crypto_perp_tool.session import SessionDetector
 from crypto_perp_tool.signals import SignalEngine
-from crypto_perp_tool.types import HistoricalWindows, MarketSnapshot, SignalSide, TradeSignal
+from crypto_perp_tool.types import (
+    CircuitBreakerReason,
+    HistoricalWindows,
+    MarketSnapshot,
+    SignalSide,
+    TradeSignal,
+)
 from crypto_perp_tool.web.details import empty_execution_details, mode_breakdown, total_pnl_for_range
+from crypto_perp_tool.web.strategy_state import cvd_divergence_state, last_action
 
 
 RANGE_MS = {
@@ -61,6 +81,7 @@ class LiveOrderflowStore:
         self._signal_engine = SignalEngine(
             min_reward_risk=self.settings.signals.min_reward_risk,
             max_data_lag_ms=self.settings.execution.max_data_lag_ms,
+            session_gating_enabled=self.settings.signals.session_gating_enabled,
         ) if enable_signals else None
         self._risk = RiskEngine(self.settings.risk)
         self._journal = JsonlJournal(journal_path) if journal_path is not None else None
@@ -82,6 +103,31 @@ class LiveOrderflowStore:
         self._last_delta_60s = 0.0
         self._last_volume_30s = 0.0
         self._last_vwap = 0.0
+        self._cumulative_delta = 0.0
+        self._bubble_detector = AggressionBubbleDetector(
+            large_threshold=self.settings.signals.aggression_large_threshold,
+            block_threshold=self.settings.signals.aggression_block_threshold,
+            dynamic_enabled=self.settings.signals.aggression_dynamic_enabled,
+            percentile_large=self.settings.signals.aggression_percentile_large,
+            percentile_block=self.settings.signals.aggression_percentile_block,
+            half_life_ms=self.settings.signals.aggression_half_life_minutes * 60 * 1000,
+        )
+        self._last_bubble: AggressionBubble | None = None
+        self._atr_1m = AtrTracker(bar_ms=60_000, period=self.settings.signals.atr_period)
+        self._atr_3m = AtrTracker(bar_ms=3 * 60_000, period=self.settings.signals.atr_period)
+        self._session_detector = SessionDetector(
+            asia_start_hour=self.settings.profile.asia_start_hour,
+            asia_end_hour=self.settings.profile.asia_end_hour,
+            london_start_hour=self.settings.profile.london_start_hour,
+            london_end_hour=self.settings.profile.london_end_hour,
+            london_end_minute=self.settings.profile.london_end_minute,
+            ny_start_hour=self.settings.profile.ny_start_hour,
+            ny_start_minute=self.settings.profile.ny_start_minute,
+            ny_end_hour=self.settings.profile.ny_end_hour,
+        )
+        self._flash_crash_detector = FlashCrashDetector()
+        self._last_signal_time = -1
+        self._signal_cooldown_ms = 30_000
         self._last_signal_reasons: tuple[str, ...] = ()
         self._last_reject_reasons: tuple[str, ...] = ()
 
@@ -90,15 +136,38 @@ class LiveOrderflowStore:
             return
         received_at = int(time.time() * 1000) if received_at is None else int(received_at)
         with self._lock:
+            self._flash_crash_detector.add_price(event.timestamp, event.price)
             self._events.append(event)
             self._trade_window.append(event.timestamp, event)
             self._last_event_time = event.timestamp
             self._last_received_at = received_at
+            self._cumulative_delta += event.delta
+            self._atr_1m.update(event)
+            self._atr_3m.update(event)
+            self._record_aggression_bubble(event)
             self._refresh_indicators(event.timestamp)
+            self._manage_position(event)
             self._try_close(event)
             self._update_historical(event)
+            if self._circuit_breaker.state != "tripped":
+                atr = self._current_atr(event.price)
+                if self._flash_crash_detector.detect(event.timestamp, atr):
+                    result = self._circuit_breaker.trip(CircuitBreakerReason.FLASH_CRASH_DETECTED)
+                    self._write_journal("flash_crash_detected", result)
+                    self._markers.append({
+                        "type": "flash_crash",
+                        "timestamp": event.timestamp,
+                        "price": event.price,
+                        "label": "FLASH CRASH",
+                    })
             self._try_signal(event, received_at)
             self._refresh_pnl_ranges()
+
+    def add_force_order(self, event: ForceOrderEvent) -> None:
+        if event.symbol.upper() != self.symbol:
+            return
+        with self._lock:
+            self._flash_crash_detector.add_liquidation(event.timestamp, event.quantity)
 
     def add_quote(self, event: QuoteEvent) -> None:
         if event.symbol.upper() != self.symbol:
@@ -126,6 +195,22 @@ class LiveOrderflowStore:
             if status == "connected" and previous == "error":
                 self._reconnect_count += 1
 
+    def resume_circuit(self, actor: str = "web") -> dict:
+        with self._lock:
+            if self._circuit_breaker.state != "tripped":
+                return {"resumed": False, "reason": "circuit is not tripped"}
+            ok = self._circuit_breaker.can_resume(
+                account_ok=True,
+                data_healthy=self._connection_status == "connected",
+                positions_reconciled=self._position is None,
+                daily_loss_within_limit=self._details["paper"]["pnl_by_range"]["24h"] > -self.settings.risk.daily_loss_limit * self.equity,
+            )
+            if not ok:
+                return {"resumed": False, "reason": "resume conditions not met"}
+            event = self._circuit_breaker.resume(actor=actor)
+            self._write_journal("circuit_breaker_resumed", event)
+            return {"resumed": True, "state": self._circuit_breaker.state}
+
     def _refresh_indicators(self, timestamp: int) -> None:
         self._last_delta_15s = self._trade_window.sum_since(timestamp, 15_000, lambda event: event.delta)
         self._last_delta_30s = self._trade_window.sum_since(timestamp, 30_000, lambda event: event.delta)
@@ -140,18 +225,40 @@ class LiveOrderflowStore:
             return 0.0
         return sum(event.price * event.quantity for event in events) / quantity
 
+    def _record_aggression_bubble(self, event: TradeEvent) -> None:
+        bubble = self._bubble_detector.detect(event)
+        if bubble is None:
+            return
+        self._last_bubble = bubble
+        self._markers.append(
+            {
+                "type": "aggression_bubble",
+                "timestamp": bubble.timestamp,
+                "price": bubble.price,
+                "label": bubble.label,
+                "side": bubble.side,
+                "quantity": bubble.quantity,
+                "tier": bubble.tier,
+            }
+        )
+
     def _profile_levels(self, timestamp: int):
         profile = VolumeProfileEngine(bin_size=self._bin_size, value_area_ratio=self.settings.profile.value_area_ratio)
         for event in self._trade_window.items_since(timestamp, self._profile_window_ms):
             profile.add_trade(event.price, event.quantity, timestamp=event.timestamp)
-        return profile.levels(window="all")
+        return tuple(replace(level, window="rolling_4h") for level in profile.levels(window="all"))
 
     def _update_historical(self, event: TradeEvent) -> None:
         spread = self._spread_bps(event)
         self._historical = self._historical.with_window("spread_5min", spread)
         self._historical = self._historical.with_window("delta_30s", self._last_delta_30s)
         self._historical = self._historical.with_window("volume_30s", self._last_volume_30s)
-        self._historical = self._historical.with_window("amplitude_1m", max(event.price * 0.002, self._bin_size / 2))
+        self._historical = self._historical.with_window("amplitude_1m", self._current_atr(event.price))
+
+    def _current_atr(self, fallback_price: float) -> float:
+        if self._atr_1m.latest_atr > 0:
+            return self._atr_1m.latest_atr
+        return max(fallback_price * 0.002, self._bin_size / 2)
 
     def _try_signal(self, event: TradeEvent, received_at: int) -> None:
         if self._signal_engine is None:
@@ -160,6 +267,8 @@ class LiveOrderflowStore:
             self._last_reject_reasons = ("circuit_breaker_tripped",)
             return
         if self._position is not None or len(self._events) < 30:
+            return
+        if self._last_signal_time >= 0 and event.timestamp - self._last_signal_time < self._signal_cooldown_ms:
             return
 
         snapshot = self._snapshot(event, received_at)
@@ -203,6 +312,7 @@ class LiveOrderflowStore:
     def _snapshot(self, event: TradeEvent, received_at: int) -> MarketSnapshot:
         bid_price = self._quote.bid_price if self._quote else event.price * 0.9999
         ask_price = self._quote.ask_price if self._quote else event.price * 1.0001
+        bubble = self._last_bubble if self._last_bubble is not None and self._last_bubble.timestamp == event.timestamp else None
         return MarketSnapshot(
             exchange=self.settings.exchange,
             symbol=self.symbol,
@@ -213,12 +323,19 @@ class LiveOrderflowStore:
             ask_price=ask_price,
             spread_bps=self._spread_bps(event),
             vwap=self._last_vwap,
-            atr_1m_14=max(event.price * 0.002, self._bin_size / 2),
+            atr_1m_14=self._current_atr(event.price),
             delta_15s=self._last_delta_15s,
             delta_30s=self._last_delta_30s,
             delta_60s=self._last_delta_60s,
             volume_30s=self._last_volume_30s,
             profile_levels=tuple(self._profile_levels(event.timestamp)),
+            atr_3m_14=self._atr_3m.latest_atr,
+            cumulative_delta=self._cumulative_delta,
+            aggression_bubble_side=bubble.side if bubble else None,
+            aggression_bubble_quantity=bubble.quantity if bubble else 0.0,
+            aggression_bubble_price=bubble.price if bubble else None,
+            aggression_bubble_tier=bubble.tier if bubble else None,
+            session=self._session_detector.detect(event.timestamp).value,
         )
 
     def _spread_bps(self, event: TradeEvent) -> float:
@@ -228,6 +345,7 @@ class LiveOrderflowStore:
 
     def _record_signal(self, signal: TradeSignal) -> None:
         self._signal_count += 1
+        self._last_signal_time = signal.created_at
         self._last_signal_reasons = tuple(signal.reasons)
         self._last_reject_reasons = ()
         record = {
@@ -266,9 +384,12 @@ class LiveOrderflowStore:
             "entry_price": fill["fill_price"],
             "signal_entry_price": signal.entry_price,
             "stop_price": signal.stop_price,
+            "initial_stop_price": signal.stop_price,
             "target_price": signal.target_price,
             "entry_fee": fill["fee"],
             "opened_at": signal.created_at,
+            "break_even_shifted": False,
+            "absorption_reduced": False,
         }
         order = {
             "timestamp": signal.created_at,
@@ -287,6 +408,127 @@ class LiveOrderflowStore:
         self._details["paper"]["orders"].append(order)
         self._write_journal("paper_fill", fill | {"signal_id": signal.id, "symbol": signal.symbol, "side": signal.side.value})
         self._write_journal("paper_order", order | {"signal_id": signal.id})
+
+    def _manage_position(self, event: TradeEvent) -> None:
+        if self._position is None:
+            return
+        self._shift_stop_to_break_even(event)
+        self._reduce_for_absorption(event)
+
+    def _shift_stop_to_break_even(self, event: TradeEvent) -> None:
+        if self._position is None or self._position.get("break_even_shifted"):
+            return
+        position = self._position
+        initial_stop = float(position.get("initial_stop_price") or position["stop_price"])
+        entry = float(position["entry_price"])
+        risk = abs(entry - initial_stop)
+        if risk <= 0:
+            return
+        side = position["side"]
+        favorable_move = event.price - entry if side == SignalSide.LONG else entry - event.price
+        if favorable_move < risk * 1.5:
+            return
+        position["stop_price"] = entry
+        position["break_even_shifted"] = True
+        self._record_protective_action(
+            "break_even_shift",
+            event.timestamp,
+            {"signal_id": position["signal_id"], "stop_price": entry, "trigger_price": event.price},
+        )
+        self._markers.append(
+            {
+                "type": "break_even_shift",
+                "timestamp": event.timestamp,
+                "price": entry,
+                "label": "BE",
+                "side": side.value,
+            }
+        )
+
+    def _reduce_for_absorption(self, event: TradeEvent) -> None:
+        if self._position is None or self._position.get("absorption_reduced"):
+            return
+        position = self._position
+        side = position["side"]
+        same_direction_delta = self._last_delta_30s if side == SignalSide.LONG else -self._last_delta_30s
+        baseline = max(abs(self._historical.mean_delta_30s()) * 2.0, 10.0)
+        atr = self._current_atr(event.price)
+        price_displacement = abs(event.price - float(position["entry_price"]))
+        if same_direction_delta < baseline or price_displacement > max(atr, event.price * 0.001):
+            return
+        reduce_quantity = self._round_quantity(float(position["quantity"]) * 0.5)
+        if reduce_quantity <= 0 or reduce_quantity >= float(position["quantity"]):
+            return
+        self._record_risk_event(
+            "absorption_detected",
+            event.timestamp,
+            {
+                "signal_id": position["signal_id"],
+                "delta_30s": self._last_delta_30s,
+                "price_displacement": price_displacement,
+                "atr": atr,
+            },
+        )
+        self._reduce_position(event, reduce_quantity, "absorption_reduce")
+
+    def _reduce_position(self, event: TradeEvent, quantity: float, reason: str) -> None:
+        if self._position is None:
+            return
+        position = self._position
+        original_quantity = float(position["quantity"])
+        close_position = dict(position)
+        close_position["quantity"] = quantity
+        close_fill = self._exit_fill(close_position, event.price)
+        gross_pnl = self._position_pnl(close_position, close_fill["fill_price"])
+        entry_fee = float(position["entry_fee"]) * (quantity / original_quantity)
+        net_pnl = gross_pnl - entry_fee - close_fill["fee"]
+        position["quantity"] = self._round_quantity(original_quantity - quantity)
+        position["entry_fee"] = float(position["entry_fee"]) - entry_fee
+        position["absorption_reduced"] = True
+        self._realized_pnl += net_pnl
+        reduced = {
+            "timestamp": event.timestamp,
+            "signal_id": position["signal_id"],
+            "symbol": position["symbol"],
+            "side": position["side"].value,
+            "quantity": quantity,
+            "entry_price": position["entry_price"],
+            "close_price": close_fill["fill_price"],
+            "stop_price": position["stop_price"],
+            "target_price": position["target_price"],
+            "gross_realized_pnl": gross_pnl,
+            "entry_fee": entry_fee,
+            "close_fee": close_fill["fee"],
+            "fee": entry_fee + close_fill["fee"],
+            "realized_pnl": net_pnl,
+            "net_realized_pnl": net_pnl,
+            "exit_reason": reason,
+        }
+        self._details["paper"]["closed_positions"].append(reduced)
+        self._details["paper"]["pnl_events"].append(
+            {
+                "timestamp": event.timestamp,
+                "symbol": position["symbol"],
+                "side": position["side"].value,
+                "realized_pnl": net_pnl,
+            }
+        )
+        self._closed_positions += 1
+        self._record_protective_action(
+            reason,
+            event.timestamp,
+            {"signal_id": position["signal_id"], "quantity": quantity, "remaining_quantity": position["quantity"]},
+        )
+        self._markers.append(
+            {
+                "type": reason,
+                "timestamp": event.timestamp,
+                "price": close_fill["fill_price"],
+                "label": "Absorb reduce",
+                "side": position["side"].value,
+            }
+        )
+        self._write_journal("position_reduced", reduced)
 
     def _try_close(self, event: TradeEvent) -> None:
         if self._position is None:
@@ -421,6 +663,20 @@ class LiveOrderflowStore:
         if self._journal is not None:
             self._journal.write(event_type, payload)
 
+    def _record_risk_event(self, event_type: str, timestamp: int, payload: dict[str, Any] | None = None) -> None:
+        event = {"timestamp": timestamp, "type": event_type}
+        if payload:
+            event.update(payload)
+        self._details["paper"]["risk_events"].append(event)
+        self._write_journal(event_type, event)
+
+    def _record_protective_action(self, action: str, timestamp: int, payload: dict[str, Any] | None = None) -> None:
+        event = {"timestamp": timestamp, "action": action}
+        if payload:
+            event.update(payload)
+        self._details["paper"]["protective_actions"].append(event)
+        self._write_journal(action, event)
+
     def view(self) -> dict[str, Any]:
         with self._lock:
             events = list(self._events)
@@ -434,6 +690,7 @@ class LiveOrderflowStore:
             position = to_jsonable(deepcopy(self._position))
             last_signal_reasons = list(self._last_signal_reasons)
             last_reject_reasons = list(self._last_reject_reasons)
+            last_bubble = to_jsonable(deepcopy(self._last_bubble))
 
         cumulative_delta = 0.0
         trades: list[dict[str, Any]] = []
@@ -452,26 +709,36 @@ class LiveOrderflowStore:
                 "delta": event.delta, "cumulative_delta": cumulative_delta,
             })
 
+        visible_markers = self._markers_for_display(markers, [trade["timestamp"] for trade in trades])
         last_trade_price = trades[-1]["price"] if trades else None
         quote_mid_price = quote.mid_price if quote is not None else None
         spot_last_price = spot.price if spot is not None else None
         index_price = mark.index_price if mark is not None else None
+        mark_price = mark.mark_price if mark is not None else None
         last_price = (
-            spot_last_price if spot_last_price is not None
-            else index_price if index_price is not None
-            else last_trade_price if last_trade_price is not None
-            else quote_mid_price
+            last_trade_price if last_trade_price is not None
+            else quote_mid_price if quote_mid_price is not None
+            else mark_price if mark_price is not None
+            else index_price
         )
         price_source = (
-            "spotTrade" if spot_last_price is not None
+            "aggTrade" if last_trade_price is not None
+            else "bookTicker" if quote_mid_price is not None
+            else "markPrice" if mark_price is not None
             else "indexPrice" if index_price is not None
-            else "aggTrade" if last_trade_price is not None
-            else "bookTicker"
+            else None
         )
-        derived_connection_status = "connected" if last_price is not None else connection_status
+        derived_connection_status = (
+            "connected" if connection_status == "starting" and last_price is not None
+            else connection_status
+        )
         last_event_time = events[-1].timestamp if events else 0
         profile_events = self._trade_window.items_since(last_event_time, self._profile_window_ms) if last_event_time else []
         levels = self._profile_levels(last_event_time) if last_event_time else ()
+        paper_actions = details.get("paper", {}).get("protective_actions", [])
+        last_break_even_shift = last_action(paper_actions, "break_even_shift")
+        last_absorption_reduce = last_action(paper_actions, "absorption_reduce")
+        divergence_state = cvd_divergence_state(events, levels)
 
         return {
             "summary": {
@@ -479,6 +746,7 @@ class LiveOrderflowStore:
                 "symbol": self.symbol,
                 "connection_status": derived_connection_status,
                 "connection_message": connection_message,
+                "session": self._session_detector.detect(self._last_event_time or int(time.time() * 1000)).value,
                 "trade_count": len(trades),
                 "seen_trade_count": len(events),
                 "profile_trade_count": len(profile_events),
@@ -488,7 +756,7 @@ class LiveOrderflowStore:
                 "bid_price": quote.bid_price if quote is not None else None,
                 "ask_price": quote.ask_price if quote is not None else None,
                 "quote_mid_price": quote_mid_price,
-                "mark_price": mark.mark_price if mark is not None else None,
+                "mark_price": mark_price,
                 "index_price": index_price,
                 "funding_rate": mark.funding_rate if mark is not None else None,
                 "next_funding_time": mark.next_funding_time if mark is not None else None,
@@ -499,6 +767,8 @@ class LiveOrderflowStore:
                 "delta_60s": self._last_delta_60s,
                 "volume_30s": self._last_volume_30s,
                 "vwap": self._last_vwap,
+                "atr_1m_14": self._current_atr(last_price or 0),
+                "atr_3m_14": self._atr_3m.latest_atr,
                 "signals": self._signal_count,
                 "orders": self._order_count,
                 "rejected": self._rejected_count,
@@ -509,7 +779,13 @@ class LiveOrderflowStore:
                 "reject_reasons": last_reject_reasons,
                 "data_lag_ms": max(0, self._last_received_at - self._last_event_time),
                 "last_trade_time": self._last_event_time or None,
+                "last_aggression_bubble": last_bubble,
+                "last_break_even_shift": last_break_even_shift,
+                "last_absorption_reduce": last_absorption_reduce,
+                "cvd_divergence": divergence_state,
                 "circuit_state": self._circuit_breaker.state,
+                "circuit_reason": self._circuit_breaker.reason.value if self._circuit_breaker.reason else None,
+                "cooldown_until": self._circuit_breaker.cooldown_until,
                 "pnl_24h": total_pnl_for_range(details, "24h"),
                 "mode_breakdown": mode_breakdown(details),
             },
@@ -521,6 +797,23 @@ class LiveOrderflowStore:
                  "strength": level.strength, "window": level.window}
                 for level in levels
             ],
-            "markers": markers,
+            "markers": visible_markers,
             "details": details,
         }
+
+    def _markers_for_display(self, markers: list[dict[str, Any]], display_timestamps: list[int]) -> list[dict[str, Any]]:
+        if not display_timestamps:
+            return markers
+        first_timestamp = display_timestamps[0]
+        last_timestamp = display_timestamps[-1]
+        visible_markers: list[dict[str, Any]] = []
+        for marker in markers:
+            marker_timestamp = int(marker.get("timestamp") or 0)
+            marker_copy = dict(marker)
+            if first_timestamp <= marker_timestamp <= last_timestamp:
+                marker_copy["index"] = min(
+                    range(len(display_timestamps)),
+                    key=lambda index: abs(display_timestamps[index] - marker_timestamp),
+                )
+            visible_markers.append(marker_copy)
+        return visible_markers

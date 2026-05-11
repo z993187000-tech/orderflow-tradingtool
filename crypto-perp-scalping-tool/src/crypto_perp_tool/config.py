@@ -28,6 +28,14 @@ class ProfileSettings:
     rolling_window_minutes: int = 240
     btc_bin_size: int = 10
     eth_bin_size: int = 2
+    asia_start_hour: int = 0
+    asia_end_hour: int = 7
+    london_start_hour: int = 7
+    london_end_hour: int = 12
+    london_end_minute: int = 30
+    ny_start_hour: int = 12
+    ny_start_minute: int = 30
+    ny_end_hour: int = 20
 
 
 @dataclass(frozen=True)
@@ -35,6 +43,14 @@ class SignalSettings:
     min_reward_risk: float = 1.2
     delta_window_seconds: tuple[int, ...] = (15, 30, 60)
     funding_blackout_minutes: int = 2
+    aggression_large_threshold: float = 10.0
+    aggression_block_threshold: float = 50.0
+    atr_period: int = 14
+    session_gating_enabled: bool = True
+    aggression_percentile_large: float = 0.95
+    aggression_percentile_block: float = 0.99
+    aggression_half_life_minutes: int = 1440
+    aggression_dynamic_enabled: bool = True
 
 
 @dataclass(frozen=True)

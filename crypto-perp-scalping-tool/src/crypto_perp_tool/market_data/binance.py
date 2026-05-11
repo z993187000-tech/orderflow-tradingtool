@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Callable
 from urllib.request import urlopen
 
-from crypto_perp_tool.market_data.events import MarkPriceEvent, QuoteEvent, SpotPriceEvent, TradeEvent
+from crypto_perp_tool.market_data.events import ForceOrderEvent, MarkPriceEvent, QuoteEvent, SpotPriceEvent, TradeEvent
 
 
 _INSTRUMENT_SPEC_CACHE: dict[str, "BinanceInstrumentSpec"] = {}
@@ -30,9 +30,9 @@ class BinanceStreamConfig:
     spot_base_url: str = "wss://stream.binance.com:9443/stream"
 
     @property
-    def market_streams(self) -> tuple[str, str]:
+    def market_streams(self) -> tuple[str, str, str]:
         symbol = self.symbol.lower()
-        return (f"{symbol}@aggTrade", f"{symbol}@markPrice@1s")
+        return (f"{symbol}@aggTrade", f"{symbol}@markPrice@1s", f"{symbol}@forceOrder")
 
     @property
     def public_streams(self) -> tuple[str, ...]:
@@ -85,6 +85,19 @@ class BinanceMarkPriceParser:
             index_price=float(payload["i"]),
             funding_rate=float(payload["r"]),
             next_funding_time=int(payload["T"]),
+        )
+
+
+class BinanceForceOrderParser:
+    def parse(self, payload: dict) -> ForceOrderEvent:
+        order = payload.get("o", payload)
+        return ForceOrderEvent(
+            timestamp=int(payload.get("T") or payload.get("E", 0)),
+            symbol=str(order.get("s", "")).upper(),
+            price=float(order.get("p", 0)),
+            quantity=float(order.get("q", 0)),
+            side=str(order.get("S", "")),
+            order_type="LIQUIDATION",
         )
 
 
@@ -167,6 +180,7 @@ class BinanceAggTradeClient:
         on_quote: Callable[[QuoteEvent], None] | None = None,
         on_mark: Callable[[MarkPriceEvent], None] | None = None,
         on_spot: Callable[[SpotPriceEvent], None] | None = None,
+        on_force_order: Callable[[ForceOrderEvent], None] | None = None,
         on_status: Callable[[str, str], None] | None = None,
         reconnect_delay_seconds: float = 3.0,
     ) -> None:
@@ -175,11 +189,13 @@ class BinanceAggTradeClient:
         self.on_quote = on_quote
         self.on_mark = on_mark
         self.on_spot = on_spot
+        self.on_force_order = on_force_order
         self.on_status = on_status
         self.reconnect_delay_seconds = reconnect_delay_seconds
         self.parser = BinanceAggTradeParser()
         self.quote_parser = BinanceBookTickerParser()
         self.mark_parser = BinanceMarkPriceParser()
+        self.force_order_parser = BinanceForceOrderParser()
         self.spot_parser = BinanceSpotTradeParser()
         self._stop = threading.Event()
 
@@ -248,6 +264,10 @@ class BinanceAggTradeClient:
         if event_type == "markPriceUpdate" or "@markPrice" in stream:
             if self.on_mark is not None:
                 self.on_mark(self.mark_parser.parse(data))
+            return
+        if event_type == "forceOrder" or stream.endswith("@forceOrder"):
+            if self.on_force_order is not None:
+                self.on_force_order(self.force_order_parser.parse(data))
             return
         if event_type == "trade" or stream.endswith("@trade"):
             if self.on_spot is not None:

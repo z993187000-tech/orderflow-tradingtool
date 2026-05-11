@@ -41,6 +41,7 @@ class CircuitBreakerReason(StrEnum):
     ORDER_PROTECTION_MISSING = "order_protection_missing"
     POSITION_MISMATCH = "position_mismatch"
     EXCHANGE_API_FAILURE = "exchange_api_failure"
+    FLASH_CRASH_DETECTED = "flash_crash_detected"
 
 
 @dataclass(frozen=True)
@@ -99,7 +100,7 @@ class MarketDataHealth:
 
     def is_stale(self, websocket_stale_ms: int = 1500, max_data_lag_ms: int = 2000) -> bool:
         now = int(time.time() * 1000)
-        if self.last_event_time > 0 and now - self.last_event_time > websocket_stale_ms:
+        if self.last_local_time > 0 and now - self.last_local_time > websocket_stale_ms:
             return True
         if self.latency_ms > max_data_lag_ms:
             return True
@@ -136,6 +137,12 @@ class MarketSnapshot:
     volume_30s: float
     profile_levels: tuple[ProfileLevel, ...]
     session: str = "unknown"
+    atr_3m_14: float = 0.0
+    cumulative_delta: float = 0.0
+    aggression_bubble_side: str | None = None
+    aggression_bubble_quantity: float = 0.0
+    aggression_bubble_price: float | None = None
+    aggression_bubble_tier: str | None = None
 
 
 @dataclass(frozen=True)

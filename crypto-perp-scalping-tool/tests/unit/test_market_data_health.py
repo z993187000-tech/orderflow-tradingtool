@@ -45,6 +45,15 @@ class MarketDataHealthTests(unittest.TestCase):
         )
         self.assertTrue(health.is_stale(websocket_stale_ms=1500))
 
+    def test_websocket_freshness_uses_local_receive_time(self):
+        now = int(time.time() * 1000)
+        health = compute_health(
+            connection_status="connected",
+            last_event_time=now - 3000,
+            last_local_time=now,
+        )
+        self.assertFalse(health.is_stale(websocket_stale_ms=1500, max_data_lag_ms=5000))
+
 
 if __name__ == "__main__":
     unittest.main()

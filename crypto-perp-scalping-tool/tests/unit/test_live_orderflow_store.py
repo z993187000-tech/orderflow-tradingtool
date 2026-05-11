@@ -58,13 +58,13 @@ class LiveOrderflowStoreTests(unittest.TestCase):
         store = LiveOrderflowStore(symbol="BTCUSDT", max_events=10)
 
         for event in [
-            TradeEvent(1000, "BTCUSDT", 100, 5, True),
-            TradeEvent(2000, "BTCUSDT", 110, 20, False),
-            TradeEvent(3000, "BTCUSDT", 120, 3, True),
-            TradeEvent(4000, "BTCUSDT", 130, 5, True),
-            TradeEvent(5000, "BTCUSDT", 140, 30, False),
-            TradeEvent(6000, "BTCUSDT", 150, 5, True),
-            TradeEvent(7000, "BTCUSDT", 126, 12, False),
+            TradeEvent(1000, "BTCUSDT", 96000, 50, False),
+            TradeEvent(2000, "BTCUSDT", 96020, 60, False),
+            TradeEvent(3000, "BTCUSDT", 96110, 2, True),
+            TradeEvent(4000, "BTCUSDT", 96100, 1, True),
+            TradeEvent(5000, "BTCUSDT", 96200, 80, False),
+            TradeEvent(6000, "BTCUSDT", 96220, 70, False),
+            TradeEvent(7000, "BTCUSDT", 96150, 5, False),
         ]:
             store.add_trade(event)
 
@@ -73,7 +73,7 @@ class LiveOrderflowStoreTests(unittest.TestCase):
         self.assertEqual(view["summary"]["source"], "binance")
         self.assertEqual(view["summary"]["symbol"], "BTCUSDT")
         self.assertEqual(view["summary"]["trade_count"], 7)
-        self.assertEqual(view["summary"]["last_price"], 126)
+        self.assertEqual(view["summary"]["last_price"], 96150)
         self.assertTrue(any(level["type"] == "LVN" for level in view["profile_levels"]))
         self.assertGreater(len(view["delta_series"]), 0)
 
@@ -93,7 +93,18 @@ class LiveOrderflowStoreTests(unittest.TestCase):
         self.assertEqual(summary["connection_status"], "error")
         self.assertEqual(summary["connection_message"], "Install websockets")
 
-    def test_live_store_uses_spot_trade_as_display_last_price(self):
+    def test_live_store_does_not_mask_error_status_after_price_arrives(self):
+        store = LiveOrderflowStore(symbol="BTCUSDT", max_events=10)
+
+        store.add_trade(TradeEvent(1000, "BTCUSDT", 100, 1, False), received_at=1000)
+        store.set_connection_status("error", "market: disconnected")
+        summary = store.view()["summary"]
+
+        self.assertEqual(summary["last_price"], 100)
+        self.assertEqual(summary["connection_status"], "error")
+        self.assertEqual(summary["connection_message"], "market: disconnected")
+
+    def test_live_store_uses_perp_trade_as_display_last_price_with_spot_context(self):
         store = LiveOrderflowStore(symbol="BTCUSDT", max_events=10)
 
         store.add_trade(TradeEvent(1000, "BTCUSDT", 100, 1, False))
@@ -101,13 +112,13 @@ class LiveOrderflowStoreTests(unittest.TestCase):
         store.add_spot(SpotPriceEvent(1200, "BTCUSDT", 112))
         summary = store.view()["summary"]
 
-        self.assertEqual(summary["last_price"], 112)
+        self.assertEqual(summary["last_price"], 100)
         self.assertEqual(summary["spot_last_price"], 112)
         self.assertEqual(summary["last_trade_price"], 100)
         self.assertEqual(summary["bid_price"], 108)
         self.assertEqual(summary["ask_price"], 110)
         self.assertEqual(summary["quote_mid_price"], 109)
-        self.assertEqual(summary["price_source"], "spotTrade")
+        self.assertEqual(summary["price_source"], "aggTrade")
 
     def test_live_store_falls_back_to_perp_trade_before_first_spot_trade(self):
         store = LiveOrderflowStore(symbol="BTCUSDT", max_events=10)
@@ -121,18 +132,31 @@ class LiveOrderflowStoreTests(unittest.TestCase):
         self.assertEqual(summary["last_trade_price"], 100)
         self.assertEqual(summary["price_source"], "aggTrade")
 
-    def test_live_store_falls_back_to_index_price_before_perp_trade(self):
+    def test_live_store_keeps_perp_trade_before_mark_or_index_price(self):
         store = LiveOrderflowStore(symbol="BTCUSDT", max_events=10)
 
         store.add_trade(TradeEvent(1000, "BTCUSDT", 100, 1, False))
         store.add_mark(MarkPriceEvent(1200, "BTCUSDT", 111, 112, 0.0001, 1300))
         summary = store.view()["summary"]
 
-        self.assertEqual(summary["last_price"], 112)
+        self.assertEqual(summary["last_price"], 100)
         self.assertEqual(summary["spot_last_price"], None)
         self.assertEqual(summary["last_trade_price"], 100)
         self.assertEqual(summary["index_price"], 112)
-        self.assertEqual(summary["price_source"], "indexPrice")
+        self.assertEqual(summary["price_source"], "aggTrade")
+
+    def test_live_store_falls_back_to_futures_mark_price_without_trade_or_quote(self):
+        store = LiveOrderflowStore(symbol="BTCUSDT", max_events=10)
+
+        store.add_spot(SpotPriceEvent(1000, "BTCUSDT", 109))
+        store.add_mark(MarkPriceEvent(1200, "BTCUSDT", 111, 112, 0.0001, 1300))
+        summary = store.view()["summary"]
+
+        self.assertEqual(summary["last_price"], 111)
+        self.assertEqual(summary["spot_last_price"], 109)
+        self.assertEqual(summary["mark_price"], 111)
+        self.assertEqual(summary["index_price"], 112)
+        self.assertEqual(summary["price_source"], "markPrice")
 
     def test_live_store_falls_back_to_quote_mid_before_first_trade(self):
         store = LiveOrderflowStore(symbol="BTCUSDT", max_events=10)
@@ -190,6 +214,33 @@ class LiveOrderflowStoreTests(unittest.TestCase):
         self.assertGreaterEqual(view["summary"]["signals"], 0)
         self.assertIn("mode_breakdown", view["summary"])
 
+    def test_live_store_adds_display_index_to_visible_markers(self):
+        signal = TradeSignal(
+            id="sig-marker-1",
+            symbol="BTCUSDT",
+            side=SignalSide.LONG,
+            setup="test_marker",
+            entry_price=100,
+            stop_price=95,
+            target_price=105,
+            confidence=0.8,
+            reasons=("test",),
+            invalidation_rules=("stop",),
+            created_at=3_900,
+        )
+        store = LiveOrderflowStore(symbol="BTCUSDT", max_events=40, enable_signals=True)
+        store._signal_engine = OneShotSignalEngine(signal)
+        store.add_quote(QuoteEvent(3_900, "BTCUSDT", 99.9, 100.1))
+
+        for index in range(30):
+            event = TradeEvent(1_000 + index * 100, "BTCUSDT", 100 + index * 0.01, 1, False)
+            store.add_trade(event, received_at=event.timestamp)
+
+        marker = next(item for item in store.view()["markers"] if item["type"] == "signal")
+
+        self.assertIn("index", marker)
+        self.assertGreater(marker["index"], 0)
+
     def test_live_store_maintains_persistent_profile_engine(self):
         store = LiveOrderflowStore(symbol="BTCUSDT", max_events=10)
 
@@ -224,6 +275,7 @@ class LiveOrderflowStoreTests(unittest.TestCase):
         self.assertEqual(view["summary"]["delta_30s"], -1)
         self.assertEqual(view["summary"]["vwap"], 200)
         self.assertEqual(poc["price"], 200)
+        self.assertEqual(poc["window"], "rolling_4h")
 
     def test_live_store_uses_received_at_for_stale_data_rejection(self):
         store = LiveOrderflowStore(symbol="BTCUSDT", max_events=40, enable_signals=True)
@@ -231,7 +283,7 @@ class LiveOrderflowStoreTests(unittest.TestCase):
         store._signal_engine = engine
 
         for index in range(30):
-            event = TradeEvent(1_000 + index * 100, "BTCUSDT", 100 + index, 1, False)
+            event = TradeEvent(1_000 + index * 100, "BTCUSDT", 100 + index * 0.01, 1, False)
             store.add_trade(event, received_at=event.timestamp + 3_000)
 
         summary = store.view()["summary"]
@@ -350,6 +402,109 @@ class LiveOrderflowStoreTests(unittest.TestCase):
         self.assertIn("reject_reasons", summary)
         self.assertEqual(summary["data_lag_ms"], 250)
         self.assertEqual(summary["last_trade_time"], 1_000)
+
+    def test_live_store_marks_aggression_bubbles_for_frontend(self):
+        store = LiveOrderflowStore(symbol="BTCUSDT", max_events=20)
+
+        store.add_trade(TradeEvent(1_000, "BTCUSDT", 100, 12, False), received_at=1_000)
+        store.add_trade(TradeEvent(2_000, "BTCUSDT", 99, 55, True), received_at=2_000)
+
+        view = store.view()
+        bubbles = [marker for marker in view["markers"] if marker["type"] == "aggression_bubble"]
+
+        self.assertEqual(len(bubbles), 2)
+        self.assertEqual(bubbles[0]["side"], "buy")
+        self.assertEqual(bubbles[0]["tier"], "large")
+        self.assertIn("index", bubbles[0])
+        self.assertEqual(bubbles[1]["side"], "sell")
+        self.assertEqual(bubbles[1]["tier"], "block")
+        self.assertEqual(view["summary"]["last_aggression_bubble"]["side"], "sell")
+
+    def test_live_paper_moves_stop_to_break_even_after_one_and_half_r(self):
+        signal = TradeSignal(
+            id="sig-break-even",
+            symbol="BTCUSDT",
+            side=SignalSide.LONG,
+            setup="test_break_even",
+            entry_price=100,
+            stop_price=90,
+            target_price=130,
+            confidence=0.8,
+            reasons=("test",),
+            invalidation_rules=("stop",),
+            created_at=4_000,
+        )
+        store = LiveOrderflowStore(symbol="BTCUSDT", max_events=60, enable_signals=True)
+        store._signal_engine = OneShotSignalEngine(signal)
+        store.add_quote(QuoteEvent(3_900, "BTCUSDT", 99.9, 100.1))
+
+        for index in range(30):
+            event = TradeEvent(1_000 + index * 100, "BTCUSDT", 100, 1, False)
+            store.add_trade(event, received_at=event.timestamp)
+        store.add_trade(TradeEvent(10_000, "BTCUSDT", 116, 1, False), received_at=10_000)
+
+        view = store.view()
+        position = view["summary"]["open_position"]
+        actions = view["details"]["paper"]["protective_actions"]
+
+        self.assertIsNotNone(position)
+        self.assertEqual(position["stop_price"], position["entry_price"])
+        self.assertTrue(any(action["action"] == "break_even_shift" for action in actions))
+        self.assertEqual(view["summary"]["last_break_even_shift"]["action"], "break_even_shift")
+
+    def test_live_paper_reduces_position_when_buy_cvd_spikes_without_price_progress(self):
+        signal = TradeSignal(
+            id="sig-absorption",
+            symbol="BTCUSDT",
+            side=SignalSide.LONG,
+            setup="test_absorption",
+            entry_price=100,
+            stop_price=90,
+            target_price=130,
+            confidence=0.8,
+            reasons=("test",),
+            invalidation_rules=("stop",),
+            created_at=4_000,
+        )
+        store = LiveOrderflowStore(symbol="BTCUSDT", max_events=80, enable_signals=True)
+        store._signal_engine = OneShotSignalEngine(signal)
+        store.add_quote(QuoteEvent(3_900, "BTCUSDT", 99.9, 100.1))
+
+        for index in range(30):
+            event = TradeEvent(1_000 + index * 100, "BTCUSDT", 100, 1, False)
+            store.add_trade(event, received_at=event.timestamp)
+        original_quantity = store.view()["summary"]["open_position"]["quantity"]
+        store.add_trade(TradeEvent(10_000, "BTCUSDT", 100.4, 60, False), received_at=10_000)
+
+        view = store.view()
+        position = view["summary"]["open_position"]
+        actions = view["details"]["paper"]["protective_actions"]
+
+        self.assertIsNotNone(position)
+        self.assertLess(position["quantity"], original_quantity)
+        self.assertTrue(any(action["action"] == "absorption_reduce" for action in actions))
+        self.assertEqual(view["summary"]["last_absorption_reduce"]["action"], "absorption_reduce")
+
+    def test_live_store_summary_exposes_strategy_explainability_state(self):
+        store = LiveOrderflowStore(symbol="BTCUSDT", max_events=20)
+
+        for event in [
+            TradeEvent(1_000, "BTCUSDT", 100, 12, False),
+            TradeEvent(61_000, "BTCUSDT", 106, 1, False),
+            TradeEvent(62_000, "BTCUSDT", 110, 1, False),
+            TradeEvent(63_000, "BTCUSDT", 104, 1, True),
+            TradeEvent(121_000, "BTCUSDT", 108, 1, False),
+        ]:
+            store.add_trade(event, received_at=event.timestamp)
+
+        summary = store.view()["summary"]
+
+        self.assertIn("atr_1m_14", summary)
+        self.assertIn("atr_3m_14", summary)
+        self.assertGreater(summary["atr_1m_14"], 0)
+        self.assertEqual(summary["last_aggression_bubble"]["side"], "buy")
+        self.assertIn("cvd_divergence", summary)
+        self.assertIn("state", summary["cvd_divergence"])
 
 
 if __name__ == "__main__":

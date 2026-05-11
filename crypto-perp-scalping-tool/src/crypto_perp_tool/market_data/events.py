@@ -41,3 +41,13 @@ class SpotPriceEvent:
     timestamp: int
     symbol: str
     price: float
+
+
+@dataclass(frozen=True)
+class ForceOrderEvent:
+    timestamp: int
+    symbol: str
+    price: float
+    quantity: float
+    side: str
+    order_type: str = "LIQUIDATION"

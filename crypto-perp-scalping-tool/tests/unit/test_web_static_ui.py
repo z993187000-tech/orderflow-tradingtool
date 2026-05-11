@@ -10,7 +10,7 @@ class WebStaticUiTests(unittest.TestCase):
     def test_index_contains_chinese_metric_labels(self):
         html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
 
-        self.assertIn("最新价", html)
+        self.assertIn("最新成交价", html)
         self.assertIn("累计Delta", html)
         self.assertIn("连接状态", html)
         self.assertIn("成交明细", html)
@@ -47,11 +47,11 @@ class WebStaticUiTests(unittest.TestCase):
         self.assertIn("clamp(", css)
         self.assertIn("rect.height", js)
 
-    def test_summary_shows_trade_and_mark_price_context(self):
+    def test_summary_shows_perp_trade_and_reference_price_context(self):
         html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
         js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
 
-        self.assertIn("现货/指数最新价", html)
+        self.assertIn("永续最新成交价", html)
         self.assertIn('id="lastPriceMeta"', html)
         self.assertIn("spot_last_price", js)
         self.assertIn("mark_price", js)
@@ -71,6 +71,36 @@ class WebStaticUiTests(unittest.TestCase):
         self.assertIn("reject_reasons", js)
         self.assertIn("data_lag_ms", js)
         self.assertIn("last_trade_time", js)
+
+    def test_price_chart_draws_aggression_bubble_markers(self):
+        js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn("aggression_bubble", js)
+        self.assertIn("drawAggressionBubble", js)
+        self.assertIn("marker.quantity", js)
+        self.assertIn("marker.side", js)
+
+    def test_dashboard_renders_strategy_explainability_panel(self):
+        html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+        js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+        css = (STATIC_DIR / "app.css").read_text(encoding="utf-8")
+
+        for element_id in [
+            "lastBreakEvenShift",
+            "lastAbsorptionReduce",
+            "lastAggressionBubble",
+            "atrState",
+            "cvdDivergence",
+        ]:
+            self.assertIn(f'id="{element_id}"', html)
+            self.assertIn(element_id, js)
+
+        self.assertIn("renderStrategyState", js)
+        self.assertIn("last_break_even_shift", js)
+        self.assertIn("last_absorption_reduce", js)
+        self.assertIn("last_aggression_bubble", js)
+        self.assertIn("cvd_divergence", js)
+        self.assertIn(".strategy-state", css)
 
     def test_static_dashboard_text_is_not_mojibake(self):
         text = (STATIC_DIR / "index.html").read_text(encoding="utf-8")

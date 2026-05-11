@@ -6,11 +6,12 @@ from pathlib import Path
 from typing import Any
 
 from crypto_perp_tool.config import default_settings
-from crypto_perp_tool.market_data import TradeEvent
+from crypto_perp_tool.market_data import AggressionBubbleDetector, AtrTracker, TradeEvent
 from crypto_perp_tool.paper import PaperRunner
 from crypto_perp_tool.profile import VolumeProfileEngine
 from crypto_perp_tool.serialization import to_jsonable
 from crypto_perp_tool.web.details import build_paper_details_from_journal, mode_breakdown, total_pnl_for_range
+from crypto_perp_tool.web.strategy_state import cvd_divergence_state, last_action
 
 
 def build_orderflow_view(data_path: Path | str, symbol: str = "BTCUSDT") -> dict[str, Any]:
@@ -19,14 +20,38 @@ def build_orderflow_view(data_path: Path | str, symbol: str = "BTCUSDT") -> dict
     settings = default_settings()
     bin_size = settings.profile.btc_bin_size if symbol == "BTCUSDT" else settings.profile.eth_bin_size
     profile = VolumeProfileEngine(bin_size=bin_size, value_area_ratio=settings.profile.value_area_ratio)
+    bubble_detector = AggressionBubbleDetector(
+        large_threshold=settings.signals.aggression_large_threshold,
+        block_threshold=settings.signals.aggression_block_threshold,
+    )
+    atr_1m = AtrTracker(bar_ms=60_000, period=settings.signals.atr_period)
+    atr_3m = AtrTracker(bar_ms=3 * 60_000, period=settings.signals.atr_period)
 
     cumulative_delta = 0.0
     trades: list[dict[str, Any]] = []
     delta_series: list[dict[str, Any]] = []
+    bubble_markers: list[dict[str, Any]] = []
+    last_bubble = None
 
     for index, event in enumerate(events):
         profile.add_trade(event.price, event.quantity)
         cumulative_delta += event.delta
+        atr_1m.update(event)
+        atr_3m.update(event)
+        bubble = bubble_detector.detect(event)
+        if bubble is not None:
+            last_bubble = bubble
+            bubble_markers.append(
+                {
+                    "type": "aggression_bubble",
+                    "timestamp": bubble.timestamp,
+                    "price": bubble.price,
+                    "label": bubble.label,
+                    "side": bubble.side,
+                    "quantity": bubble.quantity,
+                    "tier": bubble.tier,
+                }
+            )
         trades.append(
             {
                 "index": index,
@@ -50,9 +75,10 @@ def build_orderflow_view(data_path: Path | str, symbol: str = "BTCUSDT") -> dict
     with tempfile.TemporaryDirectory() as tmp:
         journal_path = Path(tmp) / "paper_journal.jsonl"
         result = PaperRunner(equity=10_000, journal_path=journal_path).run_csv(path, symbol=symbol)
-        markers = _markers_from_journal(journal_path, trades)
+        markers = _attach_marker_indexes(bubble_markers, trades) + _markers_from_journal(journal_path, trades)
         details = build_paper_details_from_journal(journal_path)
 
+    levels = profile.levels("rolling_4h")
     profile_levels = [
         {
             "type": level.type.value,
@@ -62,15 +88,23 @@ def build_orderflow_view(data_path: Path | str, symbol: str = "BTCUSDT") -> dict
             "strength": level.strength,
             "window": level.window,
         }
-        for level in profile.levels("rolling_4h")
+        for level in levels
     ]
+    last_price = trades[-1]["price"] if trades else None
+    paper_actions = details.get("paper", {}).get("protective_actions", [])
 
     return {
         "summary": {
             "symbol": symbol,
             "trade_count": len(trades),
-            "last_price": trades[-1]["price"] if trades else None,
+            "last_price": last_price,
             "cumulative_delta": cumulative_delta,
+            "atr_1m_14": _current_atr(atr_1m.latest_atr, last_price or 0, bin_size),
+            "atr_3m_14": atr_3m.latest_atr,
+            "last_aggression_bubble": to_jsonable(last_bubble),
+            "last_break_even_shift": last_action(paper_actions, "break_even_shift"),
+            "last_absorption_reduce": last_action(paper_actions, "absorption_reduce"),
+            "cvd_divergence": cvd_divergence_state(events, levels),
             "signals": result.signals,
             "orders": result.orders,
             "closed_positions": result.closed_positions,
@@ -84,6 +118,12 @@ def build_orderflow_view(data_path: Path | str, symbol: str = "BTCUSDT") -> dict
         "markers": markers,
         "details": details,
     }
+
+
+def _current_atr(latest_atr: float, fallback_price: float, bin_size: float) -> float:
+    if latest_atr > 0:
+        return latest_atr
+    return max(fallback_price * 0.002, bin_size / 2)
 
 
 def _load_trade_events(path: Path, symbol: str) -> list[TradeEvent]:

@@ -18,10 +18,10 @@ class BinanceMarketDataTests(unittest.TestCase):
     def test_stream_url_uses_usdm_futures_aggtrade_stream(self):
         config = BinanceStreamConfig(symbol="BTCUSDT")
 
-        self.assertEqual(config.market_streams, ("btcusdt@aggTrade", "btcusdt@markPrice@1s"))
+        self.assertEqual(config.market_streams, ("btcusdt@aggTrade", "btcusdt@markPrice@1s", "btcusdt@forceOrder"))
         self.assertEqual(config.public_streams, ("btcusdt@bookTicker",))
         self.assertEqual(config.spot_streams, ("btcusdt@trade",))
-        self.assertEqual(config.market_url, "wss://fstream.binance.com/market/stream?streams=btcusdt@aggTrade/btcusdt@markPrice@1s")
+        self.assertEqual(config.market_url, "wss://fstream.binance.com/market/stream?streams=btcusdt@aggTrade/btcusdt@markPrice@1s/btcusdt@forceOrder")
         self.assertEqual(config.public_url, "wss://fstream.binance.com/public/stream?streams=btcusdt@bookTicker")
         self.assertEqual(config.spot_url, "wss://stream.binance.com:9443/stream?streams=btcusdt@trade")
 

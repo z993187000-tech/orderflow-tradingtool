@@ -16,9 +16,20 @@ const els = {
   currentPositionMeta: document.getElementById("currentPositionMeta"),
   signalReasons: document.getElementById("signalReasons"),
   rejectReasons: document.getElementById("rejectReasons"),
+  lastBreakEvenShift: document.getElementById("lastBreakEvenShift"),
+  lastBreakEvenShiftMeta: document.getElementById("lastBreakEvenShiftMeta"),
+  lastAbsorptionReduce: document.getElementById("lastAbsorptionReduce"),
+  lastAbsorptionReduceMeta: document.getElementById("lastAbsorptionReduceMeta"),
+  lastAggressionBubble: document.getElementById("lastAggressionBubble"),
+  lastAggressionBubbleMeta: document.getElementById("lastAggressionBubbleMeta"),
+  atrState: document.getElementById("atrState"),
+  atrStateMeta: document.getElementById("atrStateMeta"),
+  cvdDivergence: document.getElementById("cvdDivergence"),
+  cvdDivergenceMeta: document.getElementById("cvdDivergenceMeta"),
   dataLag: document.getElementById("dataLag"),
   lastTradeTime: document.getElementById("lastTradeTime"),
   connection: document.getElementById("connection"),
+  circuitResume: document.getElementById("circuitResumeButton"),
   sourceLabel: document.getElementById("sourceLabel"),
   tradeCount: document.getElementById("tradeCount"),
   priceCanvas: document.getElementById("priceCanvas"),
@@ -89,8 +100,8 @@ function renderSummary(summary) {
   const breakdown = summary.mode_breakdown || emptyBreakdown();
   els.lastPrice.textContent = formatNumber(summary.last_price);
   els.lastPrice.title = summary.price_source ? `price source: ${summary.price_source}` : "";
-  els.lastPriceMeta.textContent = `Perp ${formatNumber(summary.last_trade_price)} / Mark ${formatNumber(summary.mark_price)} / Index ${formatNumber(summary.index_price)} / Mid ${formatNumber(summary.quote_mid_price)}`;
-  els.lastPriceMeta.title = `Spot ${formatNumber(summary.spot_last_price)} / Bid ${formatNumber(summary.bid_price)} / Ask ${formatNumber(summary.ask_price)}`;
+  els.lastPriceMeta.textContent = `Perp ${formatNumber(summary.last_trade_price)} / Mark ${formatNumber(summary.mark_price)} / Index ${formatNumber(summary.index_price)} / Mid ${formatNumber(summary.quote_mid_price)} / Spot ${formatNumber(summary.spot_last_price)}`;
+  els.lastPriceMeta.title = `Bid ${formatNumber(summary.bid_price)} / Ask ${formatNumber(summary.ask_price)}`;
   els.cumDelta.textContent = formatNumber(summary.cumulative_delta);
   els.signals.textContent = formatNumber(summary.signals);
   els.signalsSplit.textContent = splitLabel(breakdown, "signals");
@@ -104,16 +115,83 @@ function renderSummary(summary) {
   renderPosition(summary.open_position);
   els.signalReasons.textContent = reasonText(summary.signal_reasons);
   els.rejectReasons.textContent = reasonText(summary.reject_reasons);
+  renderStrategyState(summary);
   els.dataLag.textContent = `${formatNumber(summary.data_lag_ms)} ms`;
   els.lastTradeTime.textContent = formatTimestamp(summary.last_trade_time);
   els.connection.textContent = summary.connection_status || summary.source || "csv";
   els.connection.title = summary.connection_message || "";
+  const tripped = summary.circuit_state === "tripped";
+  els.circuitResume.classList.toggle("is-hidden", !tripped);
+  if (tripped) {
+    const reason = summary.circuit_reason || "unknown";
+    if (summary.cooldown_until) {
+      const remaining = Math.max(0, Math.ceil((summary.cooldown_until - Date.now()) / 1000));
+      const mins = Math.floor(remaining / 60);
+      const secs = remaining % 60;
+      els.connection.textContent = `CIRCUIT TRIPPED [${reason}] ${mins}m ${secs}s`;
+    } else {
+      els.connection.textContent = `CIRCUIT TRIPPED [${reason}]`;
+    }
+    els.connection.className = "sell";
+  } else {
+    els.connection.className = "";
+  }
+  const sessionTag = summary.session ? ` [${summary.session.toUpperCase()}]` : "";
   els.sourceLabel.textContent = summary.source === "binance"
-    ? "Binance Spot + Futures / 币安现货与永续行情"
-    : "CSV Market Replay / CSV 行情回放";
+    ? `Binance Futures / 币安永续行情${sessionTag}`
+    : `CSV Market Replay / CSV 行情回放${sessionTag}`;
   els.tradeCount.textContent = summary.profile_trade_count
     ? `${summary.trade_count} shown / ${summary.profile_trade_count} profiled`
     : `${summary.trade_count} trades`;
+}
+
+function renderStrategyState(summary) {
+  renderProtectionAction(
+    els.lastBreakEvenShift,
+    els.lastBreakEvenShiftMeta,
+    summary.last_break_even_shift,
+    "idle",
+    action => `SL ${formatNumber(action.stop_price)}`
+  );
+  renderProtectionAction(
+    els.lastAbsorptionReduce,
+    els.lastAbsorptionReduceMeta,
+    summary.last_absorption_reduce,
+    "idle",
+    action => `Qty ${formatNumber(action.quantity)} / Left ${formatNumber(action.remaining_quantity)}`
+  );
+
+  const bubble = summary.last_aggression_bubble;
+  if (bubble) {
+    els.lastAggressionBubble.textContent = `${bubble.tier || "large"} ${bubble.side || "--"}`;
+    els.lastAggressionBubble.className = bubble.side === "sell" ? "sell" : "buy";
+    els.lastAggressionBubbleMeta.textContent = `${formatNumber(bubble.quantity)} @ ${formatNumber(bubble.price)} / ${formatTimestamp(bubble.timestamp)}`;
+  } else {
+    els.lastAggressionBubble.textContent = "none";
+    els.lastAggressionBubble.className = "";
+    els.lastAggressionBubbleMeta.textContent = "--";
+  }
+
+  els.atrState.textContent = `1m ${formatNumber(summary.atr_1m_14)}`;
+  els.atrState.className = "";
+  els.atrStateMeta.textContent = `3m ${formatNumber(summary.atr_3m_14)}`;
+
+  const divergence = summary.cvd_divergence || {};
+  els.cvdDivergence.textContent = divergence.state || "none";
+  els.cvdDivergence.className = divergence.side === "short" ? "sell" : divergence.side === "long" ? "buy" : "";
+  els.cvdDivergenceMeta.textContent = divergence.reason || "--";
+}
+
+function renderProtectionAction(valueEl, metaEl, action, emptyLabel, metaFormatter) {
+  if (!action) {
+    valueEl.textContent = emptyLabel;
+    valueEl.className = "";
+    metaEl.textContent = "--";
+    return;
+  }
+  valueEl.textContent = action.action || "--";
+  valueEl.className = action.action === "absorption_reduce" ? "warn" : "buy";
+  metaEl.textContent = `${metaFormatter(action)} / ${formatTimestamp(action.timestamp)}`;
 }
 
 function renderPosition(position) {
@@ -187,9 +265,10 @@ function drawPrice(canvas, trades, markers) {
   const ctx = setupCanvas(canvas);
   if (!trades.length) return;
   const prices = trades.map(t => t.price);
-  const scale = makeScale(prices, canvas.width, canvas.height, 26);
+  const markerPrices = markers.filter(marker => Number.isFinite(Number(marker.price))).map(marker => Number(marker.price));
+  const scale = makeScale(prices.concat(markerPrices), canvas.width, canvas.height, 26);
   drawGrid(ctx, canvas);
-  drawYAxis(ctx, canvas, scale, prices);
+  drawYAxis(ctx, canvas, scale, prices.concat(markerPrices));
   ctx.strokeStyle = colors.price;
   ctx.lineWidth = 2;
   ctx.beginPath();
@@ -204,6 +283,10 @@ function drawPrice(canvas, trades, markers) {
   markers.forEach(marker => {
     const x = scale.x(marker.index ?? 0, trades.length);
     const y = scale.y(marker.price);
+    if (marker.type === "aggression_bubble") {
+      drawAggressionBubble(ctx, marker, x, y, canvas);
+      return;
+    }
     ctx.fillStyle = marker.type === "signal" ? colors.warn : colors.buy;
     ctx.beginPath();
     ctx.arc(x, y, 5, 0, Math.PI * 2);
@@ -211,6 +294,25 @@ function drawPrice(canvas, trades, markers) {
     ctx.fillStyle = colors.text;
     ctx.fillText(marker.label || marker.type, Math.min(x + 8, canvas.width - 120), Math.max(y - 8, 14));
   });
+}
+
+function drawAggressionBubble(ctx, marker, x, y, canvas) {
+  const quantity = Math.max(0, Number(marker.quantity) || 0);
+  const radius = Math.min(marker.tier === "block" ? 22 : 16, Math.max(6, Math.sqrt(marker.quantity || quantity) * 1.8));
+  const color = marker.side === "sell" ? colors.sell : colors.buy;
+  ctx.save();
+  ctx.globalAlpha = 0.28;
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.arc(x, y, radius, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalAlpha = 0.95;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = marker.tier === "block" ? 3 : 2;
+  ctx.stroke();
+  ctx.restore();
+  ctx.fillStyle = colors.text;
+  ctx.fillText(marker.label || "aggression_bubble", Math.min(x + radius + 6, canvas.width - 150), Math.max(y - radius, 14));
 }
 
 function drawDelta(canvas, series) {
@@ -386,6 +488,30 @@ document.querySelectorAll("[data-range]").forEach(element => {
     renderDetailPanel();
   });
 });
+async function resumeCircuit() {
+  if (isLoading) return;
+  isLoading = true;
+  els.circuitResume.disabled = true;
+  try {
+    const query = new URLSearchParams({ symbol: els.symbol.value, t: Date.now().toString() });
+    const response = await fetch(`/api/circuit/resume?${query.toString()}`, { method: "POST", cache: "no-store" });
+    const result = await response.json();
+    if (result.resumed) {
+      els.circuitResume.classList.add("is-hidden");
+      els.connection.className = "";
+      loadDashboard();
+    } else {
+      alert(`Resume failed: ${result.reason || "unknown"}`);
+    }
+  } catch (error) {
+    alert(`Resume error: ${error.message}`);
+  } finally {
+    isLoading = false;
+    els.circuitResume.disabled = false;
+  }
+}
+
+els.circuitResume.addEventListener("click", resumeCircuit);
 window.addEventListener("resize", loadDashboard);
 loadDashboard();
 setInterval(loadDashboard, REFRESH_INTERVAL_MS);

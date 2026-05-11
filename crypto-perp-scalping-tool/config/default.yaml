@@ -21,6 +21,14 @@ profile:
   rolling_window_minutes: 240
   btc_bin_size: 10
   eth_bin_size: 2
+  asia_start_hour: 0
+  asia_end_hour: 7
+  london_start_hour: 7
+  london_end_hour: 12
+  london_end_minute: 30
+  ny_start_hour: 12
+  ny_start_minute: 30
+  ny_end_hour: 20
 signals:
   min_reward_risk: 1.2
   delta_window_seconds:
@@ -28,3 +36,11 @@ signals:
     - 30
     - 60
   funding_blackout_minutes: 2
+  aggression_large_threshold: 10
+  aggression_block_threshold: 50
+  atr_period: 14
+  session_gating_enabled: true
+  aggression_percentile_large: 0.95
+  aggression_percentile_block: 0.99
+  aggression_half_life_minutes: 1440
+  aggression_dynamic_enabled: true

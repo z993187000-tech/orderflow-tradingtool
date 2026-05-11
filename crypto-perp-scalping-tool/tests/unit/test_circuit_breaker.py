@@ -18,7 +18,7 @@ class CircuitBreakerTests(unittest.TestCase):
         self.assertIsNotNone(cb.tripped_at)
 
     def test_can_resume_true_when_all_conditions_met(self):
-        cb = CircuitBreaker()
+        cb = CircuitBreaker(hard_cooldown_ms=0)
         cb.trip(CircuitBreakerReason.WEBSOCKET_STALE)
         ok = cb.can_resume(
             account_ok=True,

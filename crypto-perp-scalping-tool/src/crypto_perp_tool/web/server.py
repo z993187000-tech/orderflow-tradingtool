@@ -61,6 +61,25 @@ def create_app_handler(
                 return
             self._send_file(file_path)
 
+        def do_POST(self) -> None:
+            parsed = urlparse(self.path)
+            if not is_authorized(self.headers, password):
+                self._send_unauthorized()
+                return
+            if parsed.path == "/api/circuit/resume":
+                if live_stores is not None:
+                    symbol = parse_qs(parsed.query).get("symbol", [symbol])[0].upper()
+                    store = live_stores.get(symbol)
+                else:
+                    store = live_store
+                if store is None:
+                    self._send_json({"resumed": False, "reason": "no live store"})
+                    return
+                result = store.resume_circuit(actor="web")
+                self._send_json(result)
+                return
+            self.send_error(404)
+
         def log_message(self, format: str, *args) -> None:
             return
 
@@ -123,6 +142,7 @@ def serve_dashboard(
                 on_quote=store.add_quote,
                 on_mark=store.add_mark,
                 on_spot=store.add_spot,
+                on_force_order=store.add_force_order,
                 on_status=store.set_connection_status,
             )
             client.start_background()

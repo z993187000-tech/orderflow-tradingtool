@@ -14,6 +14,23 @@ RANGE_MS = {
     "30d": 30 * 24 * 60 * 60 * 1000,
 }
 
+PROTECTIVE_ACTION_TYPES = {
+    "break_even_shift",
+    "absorption_reduce",
+    "halt_new_entries",
+    "protective_close",
+}
+
+RISK_EVENT_TYPES = {
+    "absorption_detected",
+    "circuit_breaker_tripped",
+    "fast_reversal_stop_hit",
+    "partial_fill",
+    "quantity_below_partial_fill",
+    "slippage_expanded",
+    "stop_submission_failed",
+}
+
 
 def empty_execution_details() -> dict[str, Any]:
     return {
@@ -56,10 +73,10 @@ def build_paper_details_from_journal(journal_path: Path) -> dict[str, Any]:
                     "target_price": payload.get("target_price"),
                 }
             )
-        elif event_type == "position_closed":
+        elif event_type in {"position_closed", "position_reduced"}:
             realized_pnl = float(payload.get("realized_pnl") or 0)
             closed = {
-                "timestamp": timestamp,
+                "timestamp": int(payload.get("timestamp") or timestamp),
                 "symbol": payload.get("symbol"),
                 "side": payload.get("side"),
                 "quantity": payload.get("quantity"),
@@ -67,15 +84,21 @@ def build_paper_details_from_journal(journal_path: Path) -> dict[str, Any]:
                 "close_price": payload.get("close_price"),
                 "realized_pnl": realized_pnl,
             }
+            if payload.get("exit_reason"):
+                closed["exit_reason"] = payload.get("exit_reason")
             paper["closed_positions"].append(closed)
             paper["pnl_events"].append(
                 {
-                    "timestamp": timestamp,
+                    "timestamp": closed["timestamp"],
                     "symbol": payload.get("symbol"),
                     "side": payload.get("side"),
                     "realized_pnl": realized_pnl,
                 }
             )
+        elif event_type in PROTECTIVE_ACTION_TYPES:
+            paper["protective_actions"].append(_event_record(payload, timestamp, "action", event_type))
+        elif event_type in RISK_EVENT_TYPES:
+            paper["risk_events"].append(_event_record(payload, timestamp, "type", event_type))
 
     _refresh_pnl_ranges(paper)
     return to_jsonable(details)
@@ -105,7 +128,16 @@ def _empty_mode_details() -> dict[str, Any]:
         "closed_positions": [],
         "pnl_events": [],
         "pnl_by_range": {"24h": 0.0, "7d": 0.0, "30d": 0.0, "all": 0.0},
+        "risk_events": [],
+        "protective_actions": [],
     }
+
+
+def _event_record(payload: dict[str, Any], timestamp: int, label_key: str, label: str) -> dict[str, Any]:
+    record = dict(payload)
+    record["timestamp"] = int(record.get("timestamp") or timestamp)
+    record[label_key] = record.get(label_key) or label
+    return record
 
 
 def _refresh_pnl_ranges(detail: dict[str, Any]) -> None:

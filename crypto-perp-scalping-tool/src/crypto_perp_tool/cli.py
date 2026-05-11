@@ -9,6 +9,7 @@ from crypto_perp_tool.journal import JsonlJournal
 from crypto_perp_tool.paper import PaperRunner
 from crypto_perp_tool.risk import AccountState, RiskEngine
 from crypto_perp_tool.serialization import to_jsonable
+from crypto_perp_tool.simulation import SimulationRunner, default_fault_scenarios
 from crypto_perp_tool.types import SignalSide, TradeSignal
 from crypto_perp_tool.web.network import normalize_bind_host
 from crypto_perp_tool.web.server import serve_dashboard
@@ -39,6 +40,10 @@ def main(argv: list[str] | None = None) -> int:
     risk_sub = risk_parser.add_subparsers(dest="risk_command", required=True)
     check_parser = risk_sub.add_parser("check")
     check_parser.add_argument("--json", required=True)
+
+    simulation_parser = subparsers.add_parser("simulation")
+    simulation_sub = simulation_parser.add_subparsers(dest="simulation_command", required=True)
+    simulation_sub.add_parser("run")
 
     web_parser = subparsers.add_parser("web")
     web_sub = web_parser.add_subparsers(dest="web_command", required=True)
@@ -91,6 +96,24 @@ def main(argv: list[str] | None = None) -> int:
         )
         decision = RiskEngine(default_settings().risk).evaluate(signal, account)
         print(json.dumps(to_jsonable(decision), ensure_ascii=False, indent=2))
+        return 0
+
+    if args.command == "simulation" and args.simulation_command == "run":
+        results = SimulationRunner().run_all(default_fault_scenarios())
+        payload = {
+            "scenarios": len(results),
+            "by_scenario": {
+                result.scenario: {
+                    "summary": result.summary,
+                    "report": result.report,
+                    "reject_reasons": result.reject_reasons,
+                    "risk_events": result.risk_events,
+                    "protective_actions": result.protective_actions,
+                }
+                for result in results
+            },
+        }
+        print(json.dumps(to_jsonable(payload), ensure_ascii=False, indent=2))
         return 0
 
     if args.command == "web" and args.web_command == "serve":

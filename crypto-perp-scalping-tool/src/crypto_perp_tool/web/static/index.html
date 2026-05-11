@@ -10,7 +10,7 @@
     <main class="shell">
       <header class="topbar">
         <div>
-          <p class="eyebrow" id="sourceLabel">Binance Live Market / 币安实时行情</p>
+          <p class="eyebrow" id="sourceLabel">Binance Futures Live / 币安永续实时行情</p>
           <h1>Order Flow Dashboard <span>订单流盘面</span></h1>
         </div>
         <div class="controls">
@@ -19,11 +19,12 @@
             <option value="ETHUSDT">ETHUSDT</option>
           </select>
           <button id="refreshButton" type="button" title="Refresh data">Refresh 刷新</button>
+          <button id="circuitResumeButton" type="button" class="is-hidden" title="Resume trading after circuit breaker trip">Resume 恢复交易</button>
         </div>
       </header>
 
       <section class="metrics" aria-label="Summary">
-        <div class="metric-card" title="优先显示现货最新成交价；下方保留永续、标记价、指数价和盘口中间价"><span>Spot/Index Last / 现货/指数最新价</span><strong id="lastPrice">--</strong><small id="lastPriceMeta">Perp -- / Mark -- / Index -- / Mid --</small></div>
+        <div class="metric-card" title="优先显示 Binance USDⓈ-M Futures aggTrade 最新成交价；下方保留标记价、指数价、盘口中间价和现货参考价"><span>Perp Last / 永续最新成交价</span><strong id="lastPrice">--</strong><small id="lastPriceMeta">Perp -- / Mark -- / Index -- / Mid -- / Spot --</small></div>
         <div class="metric-card" title="主动买入成交量减主动卖出成交量的累计值"><span>Cum Delta / 累计Delta</span><strong id="cumDelta">--</strong></div>
         <button class="metric-card metric-action" type="button" data-detail="signals" title="查看模拟和实盘信号明细">
           <span>Signals / 信号数</span><strong id="signals">--</strong><small id="signalsSplit">模拟 -- / 实盘 --</small>
@@ -43,6 +44,40 @@
         <div class="metric-card" title="本地接收时间减交易所事件时间"><span>Data Lag / 数据延迟</span><strong id="dataLag">--</strong></div>
         <div class="metric-card" title="最近一笔 Binance aggTrade 事件时间"><span>Last Trade / 最近成交时间</span><strong id="lastTradeTime">--</strong></div>
         <div class="metric-card" title="行情 WebSocket 或回放数据源状态"><span>Connection / 连接状态</span><strong id="connection">--</strong></div>
+      </section>
+
+      <section class="panel strategy-state" aria-label="Strategy state">
+        <div class="panel-head">
+          <h2>Strategy State / 策略状态</h2>
+          <span>Paper protection / ATR / CVD divergence</span>
+        </div>
+        <div class="state-grid">
+          <div class="state-item">
+            <span>Break-even / 保本移动</span>
+            <strong id="lastBreakEvenShift">--</strong>
+            <small id="lastBreakEvenShiftMeta">--</small>
+          </div>
+          <div class="state-item">
+            <span>Absorption / 吸收减仓</span>
+            <strong id="lastAbsorptionReduce">--</strong>
+            <small id="lastAbsorptionReduceMeta">--</small>
+          </div>
+          <div class="state-item">
+            <span>Big Order / 大单气泡</span>
+            <strong id="lastAggressionBubble">--</strong>
+            <small id="lastAggressionBubbleMeta">--</small>
+          </div>
+          <div class="state-item">
+            <span>ATR / 动态波动</span>
+            <strong id="atrState">--</strong>
+            <small id="atrStateMeta">--</small>
+          </div>
+          <div class="state-item">
+            <span>CVD Divergence / CVD背离</span>
+            <strong id="cvdDivergence">--</strong>
+            <small id="cvdDivergenceMeta">--</small>
+          </div>
+        </div>
       </section>
 
       <section class="panel detail-panel is-hidden" id="detailPanel" aria-live="polite">
