@@ -406,7 +406,8 @@ class PaperTradingEngine:
             return
         position = self._position
         same_direction_delta = self._last_delta_30s if position.side == SignalSide.LONG else -self._last_delta_30s
-        baseline = 10.0
+        mean_abs_delta = abs(sum(self._rolling_delta[-30:]) / max(len(self._rolling_delta[-30:]), 1)) if self._rolling_delta else 0
+        baseline = max(mean_abs_delta * 2.0, 10.0)
         atr = self._current_atr(event.price)
         price_displacement = abs(event.price - position.entry_price)
         if same_direction_delta < baseline or price_displacement > max(atr, event.price * 0.001):
@@ -414,9 +415,26 @@ class PaperTradingEngine:
         reduce_quantity = position.quantity * 0.5
         if reduce_quantity <= 0 or reduce_quantity >= position.quantity:
             return
+        close_fill_price = self._exit_fill_price(position, event.price)
+        reduce_pnl = self._position_pnl(position, close_fill_price) * (reduce_quantity / position.quantity)
+        self._realized_pnl += reduce_pnl
         self._record_risk_event("absorption_detected", event.timestamp)
         position.quantity -= reduce_quantity
         position.absorption_reduced = True
+        self._details["paper"]["pnl_events"].append(
+            {"timestamp": event.timestamp, "symbol": position.symbol, "side": position.side.value, "realized_pnl": reduce_pnl}
+        )
+        self._details["paper"]["closed_positions"].append(
+            {
+                "timestamp": event.timestamp, "signal_id": position.signal_id,
+                "symbol": position.symbol, "side": position.side.value,
+                "quantity": reduce_quantity, "entry_price": position.entry_price,
+                "close_price": close_fill_price, "stop_price": position.stop_price,
+                "target_price": position.target_price,
+                "realized_pnl": reduce_pnl, "net_realized_pnl": reduce_pnl,
+                "exit_reason": "absorption_reduce",
+            }
+        )
         self._record_protective_action(
             "absorption_reduce",
             event.timestamp,

@@ -68,8 +68,8 @@ def create_app_handler(
                 return
             if parsed.path == "/api/circuit/resume":
                 if live_stores is not None:
-                    symbol = parse_qs(parsed.query).get("symbol", [symbol])[0].upper()
-                    store = live_stores.get(symbol)
+                    store_symbol = parse_qs(parsed.query).get("symbol", [symbol])[0].upper()
+                    store = live_stores.get(store_symbol)
                 else:
                     store = live_store
                 if store is None:
@@ -77,6 +77,23 @@ def create_app_handler(
                     return
                 result = store.resume_circuit(actor="web")
                 self._send_json(result)
+                return
+            if parsed.path == "/api/trade-log":
+                query = parse_qs(parsed.query)
+                requested_symbol = query.get("symbol", [symbol])[0].upper()
+                fmt = query.get("format", ["csv"])[0]
+                if live_stores is not None:
+                    store = live_stores.get(requested_symbol) or live_stores.get(symbol.upper())
+                else:
+                    store = live_store
+                if store is None or store._trade_log is None:
+                    self._send_json({"error": "no trade log available"})
+                    return
+                if fmt == "csv":
+                    self._send_csv_trade_log(store._trade_log, requested_symbol)
+                else:
+                    records = store._trade_log.read_all()
+                    self._send_json([r.to_csv_row() for r in records])
                 return
             self.send_error(404)
 
@@ -100,6 +117,25 @@ def create_app_handler(
             self.end_headers()
             self.wfile.write(body)
 
+        def _send_csv_trade_log(self, trade_log, symbol_name: str) -> None:
+            import csv as csv_mod
+            import io
+
+            records = trade_log.read_all()
+            headers = records[0].csv_headers() if records else []
+            buf = io.StringIO()
+            writer = csv_mod.DictWriter(buf, fieldnames=headers, extrasaction="ignore")
+            writer.writeheader()
+            for record in records:
+                writer.writerow(record.to_csv_row())
+            body = buf.getvalue().encode("utf-8-sig")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/csv; charset=utf-8")
+            self.send_header("Content-Disposition", f'attachment; filename="trade-log-{symbol_name.lower()}.csv"')
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         def _send_file(self, file_path: Path) -> None:
             body = file_path.read_bytes()
             self.send_response(200)
@@ -118,6 +154,7 @@ def serve_dashboard(
     source: str = "csv",
     symbol: str = "BTCUSDT",
     paper_journal_path: Path | str | None = None,
+    testing_mode: bool = False,
 ) -> ThreadingHTTPServer:
     live_stores = None
     clients = []
@@ -129,11 +166,17 @@ def serve_dashboard(
             symbol_journal_path = (
                 paper_journal_path_for_symbol(base_journal_path, live_symbol) if base_journal_path is not None else None
             )
+            symbol_trade_log_path = (
+                paper_journal_path_for_symbol(base_journal_path.with_name("trade-log"), live_symbol)
+                if base_journal_path is not None else None
+            )
             store = LiveOrderflowStore(
                 symbol=live_symbol,
                 enable_signals=True,
                 journal_path=symbol_journal_path,
+                trade_log_path=symbol_trade_log_path,
                 instrument_spec=fetch_instrument_spec(live_symbol),
+                testing_mode=testing_mode,
             )
             live_stores[live_symbol] = store
             client = BinanceAggTradeClient(

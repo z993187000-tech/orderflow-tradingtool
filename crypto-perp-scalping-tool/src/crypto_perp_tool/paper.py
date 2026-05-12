@@ -5,12 +5,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from crypto_perp_tool.config import default_settings
-from crypto_perp_tool.journal import JsonlJournal
+from crypto_perp_tool.journal import JsonlJournal, TradeLogger
 from crypto_perp_tool.market_data import TradeEvent
 from crypto_perp_tool.profile import VolumeProfileEngine
 from crypto_perp_tool.risk import AccountState, RiskEngine
 from crypto_perp_tool.signals import SignalEngine
-from crypto_perp_tool.types import MarketSnapshot, ProfileLevelType
+from crypto_perp_tool.types import MarketSnapshot, ProfileLevelType, make_trade_record
 from crypto_perp_tool.types import SignalSide
 
 
@@ -34,13 +34,19 @@ class PaperPosition:
     entry_price: float
     stop_price: float
     target_price: float
+    setup: str = "unknown"
+    opened_at: int = 0
+    initial_stop_price: float = 0.0
+    max_favorable_move: float = 0.0
+    max_adverse_move: float = 0.0
 
 
 class PaperRunner:
-    def __init__(self, equity: float, journal_path: Path | str) -> None:
+    def __init__(self, equity: float, journal_path: Path | str, trade_log_path: Path | str | None = None) -> None:
         self.settings = default_settings()
         self.equity = equity
         self.journal = JsonlJournal(journal_path)
+        self.trade_log = TradeLogger(trade_log_path) if trade_log_path is not None else None
         self.risk = RiskEngine(self.settings.risk)
         self.signals = SignalEngine(self.settings.signals.min_reward_risk, self.settings.execution.max_data_lag_ms)
 
@@ -63,7 +69,8 @@ class PaperRunner:
         for event in events:
             seen_events.append(event)
             if position is not None:
-                close_price = self._close_price_if_triggered(position, event.price)
+                self._update_max_moves(position, event.price)
+                exit_reason, close_price = self._close_trigger(position, event.price)
                 if close_price is not None:
                     pnl = self._position_pnl(position, close_price)
                     realized_pnl += pnl
@@ -80,6 +87,7 @@ class PaperRunner:
                             "realized_pnl": pnl,
                         },
                     )
+                    self._write_trade_record(position, event.timestamp, close_price, pnl, exit_reason)
                     position = None
 
             profile.add_trade(event.price, event.quantity)
@@ -127,6 +135,9 @@ class PaperRunner:
                     entry_price=signal.entry_price,
                     stop_price=signal.stop_price,
                     target_price=signal.target_price,
+                    setup=signal.setup,
+                    opened_at=signal.created_at,
+                    initial_stop_price=signal.stop_price,
                 )
                 self.journal.write(
                     "paper_fill",
@@ -188,20 +199,61 @@ class PaperRunner:
             return 0
         return sum(event.price * event.quantity for event in events) / total_quantity
 
-    def _close_price_if_triggered(self, position: PaperPosition, price: float) -> float | None:
+    def _close_trigger(self, position: PaperPosition, price: float) -> tuple[str | None, float | None]:
         if position.side == SignalSide.LONG:
             if price <= position.stop_price:
-                return position.stop_price
+                return "stop_loss", position.stop_price
             if price >= position.target_price:
-                return position.target_price
+                return "target", position.target_price
         if position.side == SignalSide.SHORT:
             if price >= position.stop_price:
-                return position.stop_price
+                return "stop_loss", position.stop_price
             if price <= position.target_price:
-                return position.target_price
-        return None
+                return "target", position.target_price
+        return None, None
 
     def _position_pnl(self, position: PaperPosition, close_price: float) -> float:
         if position.side == SignalSide.LONG:
             return (close_price - position.entry_price) * position.quantity
         return (position.entry_price - close_price) * position.quantity
+
+    def _update_max_moves(self, position: PaperPosition, price: float) -> None:
+        if position.side == SignalSide.LONG:
+            favorable = price - position.entry_price
+            adverse = position.entry_price - price
+        else:
+            favorable = position.entry_price - price
+            adverse = price - position.entry_price
+        if favorable > position.max_favorable_move:
+            position.max_favorable_move = favorable
+        if adverse > position.max_adverse_move:
+            position.max_adverse_move = adverse
+
+    def _write_trade_record(
+        self, position: PaperPosition, exit_time: int, exit_price: float, net_pnl: float, exit_reason: str,
+    ) -> None:
+        if self.trade_log is None:
+            return
+        record = make_trade_record(
+            signal_id=position.signal_id,
+            setup=position.setup,
+            symbol=position.symbol,
+            side=position.side.value,
+            entry_time=position.opened_at,
+            entry_price=position.entry_price,
+            quantity=position.quantity,
+            entry_fee=0.0,
+            signal_entry_price=position.entry_price,
+            initial_stop_price=position.initial_stop_price or position.stop_price,
+            stop_price=position.stop_price,
+            target_price=position.target_price,
+            exit_time=exit_time,
+            exit_price=exit_price,
+            exit_reason=exit_reason,
+            exit_fee=0.0,
+            gross_pnl=net_pnl,
+            net_pnl=net_pnl,
+            max_favorable_move=position.max_favorable_move,
+            max_adverse_move=position.max_adverse_move,
+        )
+        self.trade_log.write(record)

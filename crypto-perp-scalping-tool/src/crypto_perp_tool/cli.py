@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 from crypto_perp_tool.config import default_settings
-from crypto_perp_tool.journal import JsonlJournal
+from crypto_perp_tool.journal import JsonlJournal, TradeLogger
 from crypto_perp_tool.paper import PaperRunner
 from crypto_perp_tool.risk import AccountState, RiskEngine
 from crypto_perp_tool.serialization import to_jsonable
@@ -28,6 +28,7 @@ def main(argv: list[str] | None = None) -> int:
     run_parser = paper_sub.add_parser("run")
     run_parser.add_argument("--csv", required=True)
     run_parser.add_argument("--journal", default="data/journal.jsonl")
+    run_parser.add_argument("--trade-log", default="data/trade-log.jsonl")
     run_parser.add_argument("--equity", type=float, default=10_000)
 
     journal_parser = subparsers.add_parser("journal")
@@ -45,6 +46,16 @@ def main(argv: list[str] | None = None) -> int:
     simulation_sub = simulation_parser.add_subparsers(dest="simulation_command", required=True)
     simulation_sub.add_parser("run")
 
+    trade_log_parser = subparsers.add_parser("trade-log")
+    trade_log_sub = trade_log_parser.add_subparsers(dest="trade_log_command", required=True)
+    tl_export = trade_log_sub.add_parser("export")
+    tl_export.add_argument("--journal", required=True)
+    tl_export.add_argument("--format", choices=("csv", "json"), default="csv")
+    tl_export.add_argument("--output", required=True)
+    tl_show = trade_log_sub.add_parser("show")
+    tl_show.add_argument("--journal", required=True)
+    tl_show.add_argument("--limit", type=int, default=20)
+
     web_parser = subparsers.add_parser("web")
     web_sub = web_parser.add_subparsers(dest="web_command", required=True)
     serve_parser = web_sub.add_parser("serve")
@@ -55,6 +66,7 @@ def main(argv: list[str] | None = None) -> int:
     serve_parser.add_argument("--port", type=int, default=8000)
     serve_parser.add_argument("--paper-journal", default="data/live-paper.jsonl")
     serve_parser.add_argument("--mobile", action="store_true", help="Bind to all interfaces and print phone/LAN URLs.")
+    serve_parser.add_argument("--testing", action="store_true", help="Disable circuit breaker and risk limits for testing.")
 
     args = parser.parse_args(argv)
 
@@ -63,7 +75,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "paper" and args.paper_command == "run":
-        result = PaperRunner(equity=args.equity, journal_path=Path(args.journal)).run_csv(Path(args.csv))
+        result = PaperRunner(
+            equity=args.equity,
+            journal_path=Path(args.journal),
+            trade_log_path=Path(args.trade_log),
+        ).run_csv(Path(args.csv))
         print(json.dumps(to_jsonable(result), ensure_ascii=False, indent=2))
         return 0
 
@@ -98,6 +114,33 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(to_jsonable(decision), ensure_ascii=False, indent=2))
         return 0
 
+    if args.command == "trade-log" and args.trade_log_command == "export":
+        logger = TradeLogger(Path(args.journal))
+        if args.format == "csv":
+            count = logger.export_csv(Path(args.output))
+            print(f"Exported {count} trade records to {args.output}")
+        else:
+            records = logger.read_all()
+            with open(args.output, "w", encoding="utf-8") as f:
+                json.dump(to_jsonable([r.to_csv_row() for r in records]), f, ensure_ascii=False, indent=2)
+            print(f"Exported {len(records)} trade records to {args.output}")
+        return 0
+
+    if args.command == "trade-log" and args.trade_log_command == "show":
+        logger = TradeLogger(Path(args.journal))
+        records = logger.read_all()
+        if args.limit:
+            records = records[-args.limit:]
+        for record in records:
+            print(
+                f"{record.trade_id} | {record.setup} | {record.side} | "
+                f"entry {record.entry_price:.2f} exit {record.exit_price:.2f} | "
+                f"net {record.net_pnl:.2f} | R={record.r_multiple:.2f} | "
+                f"{record.exit_reason}"
+            )
+        print(f"\n{len(records)} trade record(s)")
+        return 0
+
     if args.command == "simulation" and args.simulation_command == "run":
         results = SimulationRunner().run_all(default_fault_scenarios())
         payload = {
@@ -124,6 +167,7 @@ def main(argv: list[str] | None = None) -> int:
             source=args.source,
             symbol=args.symbol,
             paper_journal_path=Path(args.paper_journal),
+            testing_mode=args.testing,
         )
         return 0
 

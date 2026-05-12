@@ -12,8 +12,9 @@ class AccountState:
 
 
 class RiskEngine:
-    def __init__(self, settings: RiskSettings) -> None:
+    def __init__(self, settings: RiskSettings, testing_mode: bool = False) -> None:
         self.settings = settings
+        self.testing_mode = testing_mode
 
     def evaluate(self, signal: TradeSignal, account: AccountState) -> RiskDecision:
         reject_reasons = list(self._account_reject_reasons(account))
@@ -45,11 +46,12 @@ class RiskEngine:
 
     def _account_reject_reasons(self, account: AccountState) -> tuple[str, ...]:
         reasons: list[str] = []
-        daily_loss_amount = account.equity * self.settings.daily_loss_limit
-        if account.realized_pnl_today <= -daily_loss_amount:
-            reasons.append("daily_loss_limit_reached")
-        if account.consecutive_losses >= self.settings.max_consecutive_losses:
-            reasons.append("max_consecutive_losses_reached")
+        if not self.testing_mode:
+            daily_loss_amount = account.equity * self.settings.daily_loss_limit
+            if account.realized_pnl_today <= -daily_loss_amount:
+                reasons.append("daily_loss_limit_reached")
+            if account.consecutive_losses >= self.settings.max_consecutive_losses:
+                reasons.append("max_consecutive_losses_reached")
         return tuple(reasons)
 
     def _remaining_daily_risk(self, account: AccountState) -> float:

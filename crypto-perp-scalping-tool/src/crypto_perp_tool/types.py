@@ -1,6 +1,8 @@
 import time
-from dataclasses import dataclass
+import uuid
+from dataclasses import dataclass, field
 from enum import StrEnum
+from typing import Any
 
 
 class ProfileLevelType(StrEnum):
@@ -183,3 +185,138 @@ class ExecutionOrder:
     price: float | None = None
     stop_price: float | None = None
     time_in_force: str | None = None
+
+
+@dataclass(frozen=True)
+class TradeRecord:
+    """A consolidated record of a complete open-to-close trade cycle."""
+    trade_id: str
+    signal_id: str
+    setup: str
+    symbol: str
+
+    side: str
+    entry_time: int
+    entry_price: float
+    quantity: float
+    entry_fee: float
+    signal_entry_price: float
+    initial_stop_price: float
+    stop_price: float
+    target_price: float
+
+    exit_time: int
+    exit_price: float
+    exit_reason: str
+    exit_fee: float
+
+    gross_pnl: float
+    net_pnl: float
+    pnl_percent: float
+    holding_time_ms: int
+    r_multiple: float
+
+    break_even_shifted: bool
+    absorption_reduced: bool
+    max_favorable_move: float
+    max_adverse_move: float
+
+    entry_session: str = "unknown"
+    vwap_at_entry: float = 0.0
+    atr_at_entry: float = 0.0
+    spread_bps_at_entry: float = 0.0
+    poc_at_entry: float = 0.0
+    vah_at_entry: float = 0.0
+    val_at_entry: float = 0.0
+
+    @staticmethod
+    def csv_headers() -> list[str]:
+        return [
+            "trade_id", "signal_id", "setup", "symbol", "side",
+            "entry_time", "entry_price", "quantity", "entry_fee",
+            "signal_entry_price", "initial_stop_price", "stop_price", "target_price",
+            "exit_time", "exit_price", "exit_reason", "exit_fee",
+            "gross_pnl", "net_pnl", "pnl_percent", "holding_time_ms", "r_multiple",
+            "break_even_shifted", "absorption_reduced",
+            "max_favorable_move", "max_adverse_move",
+            "entry_session", "vwap_at_entry", "atr_at_entry",
+            "spread_bps_at_entry", "poc_at_entry", "vah_at_entry", "val_at_entry",
+        ]
+
+    def to_csv_row(self) -> dict[str, Any]:
+        return {h: getattr(self, h) for h in self.csv_headers()}
+
+
+def make_trade_record(
+    *,
+    signal_id: str,
+    setup: str,
+    symbol: str,
+    side: str,
+    entry_time: int,
+    entry_price: float,
+    quantity: float,
+    entry_fee: float,
+    signal_entry_price: float,
+    initial_stop_price: float,
+    stop_price: float,
+    target_price: float,
+    exit_time: int,
+    exit_price: float,
+    exit_reason: str,
+    exit_fee: float,
+    gross_pnl: float,
+    net_pnl: float,
+    break_even_shifted: bool = False,
+    absorption_reduced: bool = False,
+    max_favorable_move: float = 0.0,
+    max_adverse_move: float = 0.0,
+    entry_session: str = "unknown",
+    vwap_at_entry: float = 0.0,
+    atr_at_entry: float = 0.0,
+    spread_bps_at_entry: float = 0.0,
+    poc_at_entry: float = 0.0,
+    vah_at_entry: float = 0.0,
+    val_at_entry: float = 0.0,
+) -> TradeRecord:
+    entry_notional = entry_price * quantity
+    pnl_percent = (net_pnl / entry_notional * 100) if entry_notional else 0.0
+    risk = abs(entry_price - initial_stop_price) * quantity
+    r_multiple = net_pnl / risk if risk else 0.0
+    holding_time_ms = max(0, exit_time - entry_time)
+    trade_id = f"{signal_id}-{exit_time}"
+    return TradeRecord(
+        trade_id=trade_id,
+        signal_id=signal_id,
+        setup=setup,
+        symbol=symbol,
+        side=side,
+        entry_time=entry_time,
+        entry_price=entry_price,
+        quantity=quantity,
+        entry_fee=entry_fee,
+        signal_entry_price=signal_entry_price,
+        initial_stop_price=initial_stop_price,
+        stop_price=stop_price,
+        target_price=target_price,
+        exit_time=exit_time,
+        exit_price=exit_price,
+        exit_reason=exit_reason,
+        exit_fee=exit_fee,
+        gross_pnl=gross_pnl,
+        net_pnl=net_pnl,
+        pnl_percent=round(pnl_percent, 6),
+        holding_time_ms=holding_time_ms,
+        r_multiple=round(r_multiple, 4),
+        break_even_shifted=break_even_shifted,
+        absorption_reduced=absorption_reduced,
+        max_favorable_move=max_favorable_move,
+        max_adverse_move=max_adverse_move,
+        entry_session=entry_session,
+        vwap_at_entry=vwap_at_entry,
+        atr_at_entry=atr_at_entry,
+        spread_bps_at_entry=spread_bps_at_entry,
+        poc_at_entry=poc_at_entry,
+        vah_at_entry=vah_at_entry,
+        val_at_entry=val_at_entry,
+    )

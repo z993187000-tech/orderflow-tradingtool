@@ -83,7 +83,7 @@ async function loadDashboard() {
     const data = await response.json();
     latestDashboard = data;
     renderSummary(data.summary);
-    drawPrice(els.priceCanvas, data.trades, data.markers);
+    drawPrice(els.priceCanvas, data.trades, data.markers, data.profile_levels);
     drawDelta(els.deltaCanvas, data.delta_series);
     renderProfile(data.profile_levels);
     renderTape(data.trades.slice(-12).reverse());
@@ -261,19 +261,27 @@ function recordRow(kind, record) {
   return `<tr><td>${formatTimestamp(record.timestamp)}</td><td>${record.side || "--"}</td><td class="${pnlClass}">${formatNumber(record.realized_pnl)}</td></tr>`;
 }
 
-function drawPrice(canvas, trades, markers) {
+function drawPrice(canvas, trades, markers, profileLevels) {
   const ctx = setupCanvas(canvas);
   if (!trades.length) return;
   const prices = trades.map(t => t.price);
-  const markerPrices = markers.filter(marker => Number.isFinite(Number(marker.price))).map(marker => Number(marker.price));
-  const scale = makeScale(prices.concat(markerPrices), canvas.width, canvas.height, 26);
+  const timestamps = trades.map(t => t.timestamp);
+  const profilePrices = (profileLevels || []).map(l => l.price).filter(p => Number.isFinite(Number(p)));
+  const allPrices = prices.concat(profilePrices);
+  const minTs = timestamps[0];
+  const maxTs = timestamps[timestamps.length - 1];
+  const scale = makeTimeScale(allPrices, minTs, maxTs, canvas.width, canvas.height, 28, 50);
+
   drawGrid(ctx, canvas);
-  drawYAxis(ctx, canvas, scale, prices.concat(markerPrices));
+  drawYAxis(ctx, canvas, scale, allPrices);
+  drawTimeAxis(ctx, canvas, scale, minTs, maxTs);
+  drawProfileLines(ctx, canvas, scale, profileLevels);
+
   ctx.strokeStyle = colors.price;
   ctx.lineWidth = 2;
   ctx.beginPath();
   trades.forEach((trade, index) => {
-    const x = scale.x(index, trades.length);
+    const x = scale.x(trade.timestamp);
     const y = scale.y(trade.price);
     if (index === 0) ctx.moveTo(x, y);
     else ctx.lineTo(x, y);
@@ -281,8 +289,9 @@ function drawPrice(canvas, trades, markers) {
   ctx.stroke();
 
   markers.forEach(marker => {
-    const x = scale.x(marker.index ?? 0, trades.length);
-    const y = scale.y(marker.price);
+    const markerTs = marker.timestamp || 0;
+    const x = scale.x(markerTs);
+    const y = scale.y(Number(marker.price));
     if (marker.type === "aggression_bubble") {
       drawAggressionBubble(ctx, marker, x, y, canvas);
       return;
@@ -294,6 +303,48 @@ function drawPrice(canvas, trades, markers) {
     ctx.fillStyle = colors.text;
     ctx.fillText(marker.label || marker.type, Math.min(x + 8, canvas.width - 120), Math.max(y - 8, 14));
   });
+}
+
+function drawProfileLines(ctx, canvas, scale, profileLevels) {
+  if (!profileLevels || !profileLevels.length) return;
+  const lineColors = { POC: "#e7b84b", HVN: "#36c98a", LVN: "#ef5b5b", VAH: "#4fb6d8", VAL: "#4fb6d8" };
+  const lineLabels = { POC: "POC", HVN: "HVN", LVN: "LVN", VAH: "VAH", VAL: "VAL" };
+  const labelX = canvas.width - 6;
+  ctx.textAlign = "right";
+  ctx.font = "11px Segoe UI, Arial";
+  for (const level of profileLevels) {
+    const y = scale.y(level.price);
+    if (y < 10 || y > canvas.height - 10) continue;
+    const color = lineColors[level.type] || "#aaa69b";
+    ctx.save();
+    ctx.globalAlpha = 0.45;
+    ctx.strokeStyle = color;
+    ctx.setLineDash([6, 4]);
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(50, y);
+    ctx.lineTo(canvas.width, y);
+    ctx.stroke();
+    ctx.restore();
+    ctx.fillStyle = color;
+    ctx.fillText((lineLabels[level.type] || level.type) + " " + formatNumber(level.price), labelX, y - 4);
+  }
+}
+
+function drawTimeAxis(ctx, canvas, scale, minTs, maxTs) {
+  const range = maxTs - minTs || 1;
+  const targetTicks = 5;
+  const intervalMs = range / targetTicks;
+  ctx.fillStyle = colors.text;
+  ctx.font = "11px Segoe UI, Arial";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "top";
+  for (let i = 0; i <= targetTicks; i += 1) {
+    const ts = minTs + intervalMs * i;
+    const x = scale.x(ts);
+    if (x < 50 || x > canvas.width - 10) continue;
+    ctx.fillText(formatTimeTick(ts), x, canvas.height - 16);
+  }
 }
 
 function drawAggressionBubble(ctx, marker, x, y, canvas) {
@@ -319,13 +370,16 @@ function drawDelta(canvas, series) {
   const ctx = setupCanvas(canvas);
   if (!series.length) return;
   const values = series.map(point => point.cumulative_delta);
-  const scale = makeScale(values, canvas.width, canvas.height, 22);
+  const timestamps = series.map(point => point.timestamp);
+  const minTs = timestamps[0];
+  const maxTs = timestamps[timestamps.length - 1];
+  const scale = makeTimeScale(values, minTs, maxTs, canvas.width, canvas.height, 22, 50);
   drawGrid(ctx, canvas);
   drawYAxis(ctx, canvas, scale, values);
   const zeroY = scale.y(0);
   ctx.strokeStyle = colors.grid;
   ctx.beginPath();
-  ctx.moveTo(0, zeroY);
+  ctx.moveTo(50, zeroY);
   ctx.lineTo(canvas.width, zeroY);
   ctx.stroke();
 
@@ -333,18 +387,32 @@ function drawDelta(canvas, series) {
   ctx.lineWidth = 2;
   ctx.beginPath();
   series.forEach((point, index) => {
-    const x = scale.x(index, series.length);
+    const x = scale.x(point.timestamp);
     const y = scale.y(point.cumulative_delta);
     if (index === 0) ctx.moveTo(x, y);
     else ctx.lineTo(x, y);
   });
   ctx.stroke();
+  drawTimeAxis(ctx, canvas, scale, minTs, maxTs);
 }
 
 function renderProfile(levels) {
-  const maxStrength = Math.max(...levels.map(level => level.strength), 1);
+  const maxHvnLvn = 6;
+  const seen = new Set();
+  const deduped = [];
+  const hvnLvnCount = { HVN: 0, LVN: 0 };
+  for (const level of levels) {
+    const key = `${level.type}:${level.price}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if ((level.type === "HVN" || level.type === "LVN") && hvnLvnCount[level.type] >= maxHvnLvn) continue;
+    if (level.type === "HVN") hvnLvnCount.HVN += 1;
+    if (level.type === "LVN") hvnLvnCount.LVN += 1;
+    deduped.push(level);
+  }
+  const maxStrength = Math.max(...deduped.map(level => level.strength), 1);
   const colorFor = { POC: colors.warn, HVN: colors.buy, LVN: colors.sell, VAH: colors.price, VAL: colors.price };
-  els.profile.innerHTML = levels
+  els.profile.innerHTML = deduped
     .sort((a, b) => b.price - a.price)
     .map(level => {
       const width = Math.max(8, Math.round((level.strength / maxStrength) * 100));
@@ -379,6 +447,17 @@ function setupCanvas(canvas) {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.font = "12px Segoe UI, Arial";
   return ctx;
+}
+
+function makeTimeScale(values, minTs, maxTs, width, height, padY, padX) {
+  const min = Math.min(...values, 0);
+  const max = Math.max(...values, 0);
+  const span = max - min || 1;
+  const tsRange = maxTs - minTs || 1;
+  return {
+    x: ts => padX + ((ts - minTs) / tsRange) * (width - padX * 2),
+    y: value => height - padY - ((value - min) / span) * (height - padY * 2)
+  };
 }
 
 function makeScale(values, width, height, pad) {
@@ -454,6 +533,12 @@ function formatTapeTimestamp(value) {
   const number = Number(value);
   if (number < 946684800000) return number.toString();
   return new Date(number).toLocaleTimeString(undefined, { hour12: false });
+}
+
+function formatTimeTick(value) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return "--";
+  const d = new Date(Number(value));
+  return d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
 }
 
 function formatAxisValue(value) {
