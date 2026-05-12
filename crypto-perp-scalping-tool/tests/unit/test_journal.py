@@ -28,6 +28,29 @@ class JournalTests(unittest.TestCase):
         self.assertEqual(event["payload"]["api_key"], "***REDACTED***")
         self.assertEqual(event["payload"]["message"], "status")
 
+    def test_journal_includes_config_version_when_provided(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "events.jsonl"
+            journal = JsonlJournal(path, config_version="abc123def456")
+
+            journal.write("test_event", {"key": "value"})
+
+            event = json.loads(path.read_text(encoding="utf-8"))
+
+        self.assertEqual(event["type"], "test_event")
+        self.assertEqual(event["config_version"], "abc123def456")
+
+    def test_journal_omits_config_version_when_empty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "events.jsonl"
+            journal = JsonlJournal(path)
+
+            journal.write("test_event", {"key": "value"})
+
+            event = json.loads(path.read_text(encoding="utf-8"))
+
+        self.assertNotIn("config_version", event)
+
 
 if __name__ == "__main__":
     unittest.main()

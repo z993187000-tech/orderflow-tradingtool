@@ -10,9 +10,10 @@ from crypto_perp_tool.serialization import to_jsonable
 
 
 class JsonlJournal:
-    def __init__(self, path: Path | str) -> None:
+    def __init__(self, path: Path | str, config_version: str = "") -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._config_version = config_version
 
     def write(self, event_type: str, payload: dict[str, Any]) -> None:
         event = {
@@ -20,6 +21,8 @@ class JsonlJournal:
             "time": int(time.time() * 1000),
             "payload": redact(to_jsonable(payload)),
         }
+        if self._config_version:
+            event["config_version"] = self._config_version
         with self.path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(event, ensure_ascii=False) + "\n")
 

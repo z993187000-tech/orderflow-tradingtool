@@ -6,7 +6,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from crypto_perp_tool.journal import JsonlJournal
 from crypto_perp_tool.market_data.binance import BinanceAggTradeClient, fetch_instrument_spec
+from crypto_perp_tool.service import TradingService
+from crypto_perp_tool.telegram_bot import TelegramCommandHandler, TelegramPoller, parse_allowed_chat_ids
 from crypto_perp_tool.web.auth import is_authorized, required_auth_header
 from crypto_perp_tool.web.health import health_payload
 from crypto_perp_tool.web.live_store import LiveOrderflowStore
@@ -190,6 +193,19 @@ def serve_dashboard(
             )
             client.start_background()
             clients.append(client)
+
+    poller = None
+    if live_stores is not None and paper_journal_path is not None:
+        telegram_journal = JsonlJournal(
+            Path(paper_journal_path).with_name(Path(paper_journal_path).stem + "-telegram" + Path(paper_journal_path).suffix)
+        )
+        service = TradingService(journal=telegram_journal)
+        allowed_chat_ids = parse_allowed_chat_ids(os.environ.get("TELEGRAM_ALLOWED_CHAT_IDS", ""))
+        primary_store = live_stores.get(symbol.upper(), next(iter(live_stores.values())))
+        bot_handler = TelegramCommandHandler(service=service, allowed_chat_ids=allowed_chat_ids, store=primary_store)
+        poller = TelegramPoller(handler=bot_handler, journal=telegram_journal)
+        poller.start()
+
     handler = create_app_handler(data_path=data_path, live_stores=live_stores, source=source, symbol=symbol)
     server = ThreadingHTTPServer((host, port), handler)
     urls = dashboard_urls(host, port)
@@ -200,6 +216,8 @@ def serve_dashboard(
     try:
         server.serve_forever()
     finally:
+        if poller is not None:
+            poller.stop()
         for client in clients:
             client.stop()
     return server

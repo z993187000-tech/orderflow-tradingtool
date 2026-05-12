@@ -96,7 +96,7 @@ class LiveOrderflowStore:
         ) if enable_signals else None
         self.testing_mode = testing_mode
         self._risk = RiskEngine(self.settings.risk, testing_mode=testing_mode)
-        self._journal = JsonlJournal(journal_path) if journal_path is not None else None
+        self._journal = JsonlJournal(journal_path, config_version=self.settings.config_version) if journal_path is not None else None
         self._trade_log: TradeLogger | None = TradeLogger(trade_log_path) if trade_log_path is not None else None
         self._circuit_breaker = CircuitBreaker()
         self._signal_count = 0
@@ -111,6 +111,7 @@ class LiveOrderflowStore:
         self._markers: list[dict[str, Any]] = []
         self._last_event_time = 0
         self._last_received_at = 0
+        self._recent_lags: deque[int] = deque(maxlen=20)
         self._last_delta_15s = 0.0
         self._last_delta_30s = 0.0
         self._last_delta_60s = 0.0
@@ -154,6 +155,7 @@ class LiveOrderflowStore:
             self._trade_window.append(event.timestamp, event)
             self._last_event_time = event.timestamp
             self._last_received_at = received_at
+            self._recent_lags.append(max(0, self._last_received_at - self._last_event_time))
             self._cumulative_delta += event.delta
             self._atr_1m.update(event)
             self._atr_3m.update(event)
@@ -350,6 +352,14 @@ class LiveOrderflowStore:
             aggression_bubble_tier=bubble.tier if bubble else None,
             session=self._session_detector.detect(event.timestamp).value,
         )
+
+    def _median_recent_lag(self) -> int:
+        if not self._recent_lags:
+            return 0
+        sorted_lags = sorted(self._recent_lags)
+        n = len(sorted_lags)
+        mid = sorted_lags[n // 2] if n % 2 else (sorted_lags[n // 2 - 1] + sorted_lags[n // 2]) // 2
+        return min(mid, 5_000)
 
     def _spread_bps(self, event: TradeEvent) -> float:
         return self._spread_bps_from_quote()
@@ -790,7 +800,11 @@ class LiveOrderflowStore:
         cumulative_delta = 0.0
         trades: list[dict[str, Any]] = []
         delta_series: list[dict[str, Any]] = []
-        display_events = events[-self.display_events:]
+        four_hours_ms = 4 * 60 * 60 * 1000
+        last_event_time = events[-1].timestamp if events else 0
+        time_window_count = sum(1 for e in events if last_event_time - e.timestamp <= four_hours_ms) if last_event_time else 0
+        effective_display = max(self.display_events, time_window_count)
+        display_events = events[-effective_display:]
 
         for index, event in enumerate(display_events):
             cumulative_delta += event.delta
@@ -872,7 +886,7 @@ class LiveOrderflowStore:
                 "open_position": position,
                 "signal_reasons": last_signal_reasons,
                 "reject_reasons": last_reject_reasons,
-                "data_lag_ms": max(0, self._last_received_at - self._last_event_time),
+                "data_lag_ms": self._median_recent_lag(),
                 "last_trade_time": self._last_event_time or None,
                 "last_aggression_bubble": last_bubble,
                 "last_break_even_shift": last_break_even_shift,

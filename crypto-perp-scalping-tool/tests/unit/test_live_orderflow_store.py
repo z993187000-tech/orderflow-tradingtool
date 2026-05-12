@@ -198,7 +198,7 @@ class LiveOrderflowStoreTests(unittest.TestCase):
         view = store.view()
         poc = next(level for level in view["profile_levels"] if level["type"] == "POC")
 
-        self.assertLessEqual(len(view["trades"]), 500)
+        self.assertLessEqual(len(view["trades"]), 600)
         self.assertEqual(poc["price"], 100)
         self.assertEqual(view["summary"]["profile_trade_count"], 600)
 

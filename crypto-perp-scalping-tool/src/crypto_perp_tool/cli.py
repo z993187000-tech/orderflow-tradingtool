@@ -7,6 +7,7 @@ from pathlib import Path
 from crypto_perp_tool.config import default_settings
 from crypto_perp_tool.journal import JsonlJournal, TradeLogger
 from crypto_perp_tool.paper import PaperRunner
+from crypto_perp_tool.replay import ReplayEngine
 from crypto_perp_tool.risk import AccountState, RiskEngine
 from crypto_perp_tool.serialization import to_jsonable
 from crypto_perp_tool.simulation import SimulationRunner, default_fault_scenarios
@@ -55,6 +56,15 @@ def main(argv: list[str] | None = None) -> int:
     tl_show = trade_log_sub.add_parser("show")
     tl_show.add_argument("--journal", required=True)
     tl_show.add_argument("--limit", type=int, default=20)
+
+    replay_parser = subparsers.add_parser("replay")
+    replay_sub = replay_parser.add_subparsers(dest="replay_command", required=True)
+    replay_run = replay_sub.add_parser("run")
+    replay_run.add_argument("--journal", required=True, help="Path to JSONL journal file")
+    replay_run.add_argument("--csv", help="Path to CSV trade data for replay events")
+    replay_run.add_argument("--symbol", default="BTCUSDT")
+    replay_run.add_argument("--start", type=int, help="Start timestamp ms for time-range filter")
+    replay_run.add_argument("--end", type=int, help="End timestamp ms for time-range filter")
 
     web_parser = subparsers.add_parser("web")
     web_sub = web_parser.add_subparsers(dest="web_command", required=True)
@@ -135,7 +145,7 @@ def main(argv: list[str] | None = None) -> int:
             print(
                 f"{record.trade_id} | {record.setup} | {record.side} | "
                 f"entry {record.entry_price:.2f} exit {record.exit_price:.2f} | "
-                f"net {record.net_pnl:.2f} | R={record.r_multiple:.2f} | "
+                f"net {record.net_pnl:.2f} ({record.pnl_percent:+.2f}%) | R={record.r_multiple:.2f} | "
                 f"{record.exit_reason}"
             )
         print(f"\n{len(records)} trade record(s)")
@@ -159,6 +169,35 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(to_jsonable(payload), ensure_ascii=False, indent=2))
         return 0
 
+    if args.command == "replay" and args.replay_command == "run":
+        if not Path(args.journal).exists():
+            print(f"Error: journal file not found: {args.journal}")
+            return 1
+        engine = ReplayEngine(journal_path=Path(args.journal), symbol=args.symbol)
+        if args.csv:
+            from crypto_perp_tool.market_data import TradeEvent
+            events = _load_replay_csv(Path(args.csv), args.symbol)
+        else:
+            events = []
+        if not events:
+            print("Warning: no CSV events provided; replay will compare journal signals only.")
+        report = engine.replay(events, start_ms=args.start, end_ms=args.end)
+        print(json.dumps(to_jsonable({
+            "journal_path": report.journal_path,
+            "symbol": report.symbol,
+            "total_journal_signals": report.total_journal_signals,
+            "replayed_signals": report.replayed_signals,
+            "matched": report.matched,
+            "missed": report.missed,
+            "extra": report.extra,
+            "match_rate": round(report.matched / max(report.total_journal_signals, 1), 4),
+            "price_matched": report.price_matched,
+            "avg_entry_diff_pct": report.avg_entry_diff_pct,
+            "avg_stop_diff_pct": report.avg_stop_diff_pct,
+            "avg_target_diff_pct": report.avg_target_diff_pct,
+        }), ensure_ascii=False, indent=2))
+        return 0
+
     if args.command == "web" and args.web_command == "serve":
         serve_dashboard(
             host=normalize_bind_host(args.host, args.mobile),
@@ -173,6 +212,23 @@ def main(argv: list[str] | None = None) -> int:
 
     parser.error("unsupported command")
     return 2
+
+
+def _load_replay_csv(path: Path, symbol: str) -> list:
+    import csv
+    from crypto_perp_tool.market_data import TradeEvent
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        rows = csv.DictReader(handle)
+        return [
+            TradeEvent(
+                timestamp=int(row["timestamp"]),
+                symbol=row.get("symbol", symbol),
+                price=float(row["price"]),
+                quantity=float(row["quantity"]),
+                is_buyer_maker=str(row.get("is_buyer_maker", "false")).lower() == "true",
+            )
+            for row in rows
+        ]
 
 
 if __name__ == "__main__":

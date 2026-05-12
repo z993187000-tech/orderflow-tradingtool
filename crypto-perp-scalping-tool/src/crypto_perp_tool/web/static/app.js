@@ -34,7 +34,6 @@ const els = {
   tradeCount: document.getElementById("tradeCount"),
   priceCanvas: document.getElementById("priceCanvas"),
   deltaCanvas: document.getElementById("deltaCanvas"),
-  profile: document.getElementById("profileLevels"),
   tape: document.getElementById("tapeBody"),
   detailPanel: document.getElementById("detailPanel"),
   detailTitle: document.getElementById("detailTitle"),
@@ -85,7 +84,6 @@ async function loadDashboard() {
     renderSummary(data.summary);
     drawPrice(els.priceCanvas, data.trades, data.markers, data.profile_levels);
     drawDelta(els.deltaCanvas, data.delta_series);
-    renderProfile(data.profile_levels);
     renderTape(data.trades.slice(-12).reverse());
     if (!els.detailPanel.classList.contains("is-hidden")) renderDetailPanel();
   } catch (error) {
@@ -264,13 +262,15 @@ function recordRow(kind, record) {
 function drawPrice(canvas, trades, markers, profileLevels) {
   const ctx = setupCanvas(canvas);
   if (!trades.length) return;
+  const histogramWidth = (profileLevels && profileLevels.length) ? 72 : 0;
+  const chartRight = canvas.width - histogramWidth;
   const prices = trades.map(t => t.price);
   const timestamps = trades.map(t => t.timestamp);
   const profilePrices = (profileLevels || []).map(l => l.price).filter(p => Number.isFinite(Number(p)));
   const allPrices = prices.concat(profilePrices);
   const minTs = timestamps[0];
   const maxTs = timestamps[timestamps.length - 1];
-  const scale = makeTimeScale(allPrices, minTs, maxTs, canvas.width, canvas.height, 28, 50);
+  const scale = makeTimeScale(allPrices, minTs, maxTs, chartRight, canvas.height, 28, 50);
 
   drawGrid(ctx, canvas);
   drawYAxis(ctx, canvas, scale, allPrices);
@@ -288,6 +288,7 @@ function drawPrice(canvas, trades, markers, profileLevels) {
   });
   ctx.stroke();
 
+  const placedLabels = [];
   markers.forEach(marker => {
     const markerTs = marker.timestamp || 0;
     const x = scale.x(markerTs);
@@ -301,8 +302,15 @@ function drawPrice(canvas, trades, markers, profileLevels) {
     ctx.arc(x, y, 5, 0, Math.PI * 2);
     ctx.fill();
     ctx.fillStyle = colors.text;
-    ctx.fillText(marker.label || marker.type, Math.min(x + 8, canvas.width - 120), Math.max(y - 8, 14));
+    let labelY = Math.max(y - 8, 14);
+    for (const placed of placedLabels) {
+      if (Math.abs(labelY - placed) < 14) labelY = placed + 14;
+    }
+    placedLabels.push(labelY);
+    ctx.fillText(marker.label || marker.type, Math.min(x + 8, chartRight - 90), labelY);
   });
+
+  if (histogramWidth > 0) drawVolumeProfileHistogram(ctx, canvas, scale, profileLevels, histogramWidth);
 }
 
 function drawProfileLines(ctx, canvas, scale, profileLevels) {
@@ -396,12 +404,13 @@ function drawDelta(canvas, series) {
   drawTimeAxis(ctx, canvas, scale, minTs, maxTs);
 }
 
-function renderProfile(levels) {
-  const maxHvnLvn = 6;
+function drawVolumeProfileHistogram(ctx, canvas, scale, profileLevels, histWidth) {
+  if (!profileLevels || !profileLevels.length) return;
+  const maxHvnLvn = 8;
   const seen = new Set();
   const deduped = [];
   const hvnLvnCount = { HVN: 0, LVN: 0 };
-  for (const level of levels) {
+  for (const level of profileLevels) {
     const key = `${level.type}:${level.price}`;
     if (seen.has(key)) continue;
     seen.add(key);
@@ -410,20 +419,37 @@ function renderProfile(levels) {
     if (level.type === "LVN") hvnLvnCount.LVN += 1;
     deduped.push(level);
   }
-  const maxStrength = Math.max(...deduped.map(level => level.strength), 1);
+  const maxStrength = Math.max(...deduped.map(l => l.strength), 1);
   const colorFor = { POC: colors.warn, HVN: colors.buy, LVN: colors.sell, VAH: colors.price, VAL: colors.price };
-  els.profile.innerHTML = deduped
-    .sort((a, b) => b.price - a.price)
-    .map(level => {
-      const width = Math.max(8, Math.round((level.strength / maxStrength) * 100));
-      const color = colorFor[level.type] || colors.price;
-      return `<div class="level-row">
-        <span class="badge" style="background:${color}">${level.type}</span>
-        <span class="bar"><span style="width:${width}%;background:${color}"></span></span>
-        <span class="price">${formatNumber(level.price)}</span>
-      </div>`;
-    })
-    .join("");
+  const labelX = canvas.width - 4;
+  const barAreaLeft = canvas.width - histWidth + 4;
+
+  ctx.textAlign = "right";
+  ctx.font = "10px Segoe UI, Arial";
+
+  for (const level of deduped) {
+    const y = scale.y(level.price);
+    if (y < 8 || y > canvas.height - 8) continue;
+    const color = colorFor[level.type] || colors.price;
+    const barWidth = Math.max(4, Math.round((level.strength / maxStrength) * (histWidth - 16)));
+    const barY = y - 2;
+    const barH = Math.max(3, Math.min(6, (canvas.height - 56) / Math.max(deduped.length, 1)));
+
+    ctx.fillStyle = color;
+    ctx.globalAlpha = 0.35;
+    ctx.fillRect(barAreaLeft, barY, barWidth, barH);
+    ctx.globalAlpha = 0.9;
+    ctx.fillStyle = color;
+    ctx.fillText((level.type === "POC" ? "POC" : level.type === "HVN" ? "H" : level.type === "LVN" ? "L" : level.type) + " " + formatNumber(level.price), labelX, y + 3);
+  }
+  ctx.globalAlpha = 1;
+
+  ctx.strokeStyle = "#3a3a3a";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(barAreaLeft - 2, 0);
+  ctx.lineTo(barAreaLeft - 2, canvas.height);
+  ctx.stroke();
 }
 
 function renderTape(trades) {
@@ -450,23 +476,29 @@ function setupCanvas(canvas) {
 }
 
 function makeTimeScale(values, minTs, maxTs, width, height, padY, padX) {
-  const min = Math.min(...values, 0);
-  const max = Math.max(...values, 0);
-  const span = max - min || 1;
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const padding = (max - min) * 0.08 || max * 0.01 || 1;
+  const rangeMin = min - padding;
+  const rangeMax = max + padding;
+  const span = rangeMax - rangeMin || 1;
   const tsRange = maxTs - minTs || 1;
   return {
     x: ts => padX + ((ts - minTs) / tsRange) * (width - padX * 2),
-    y: value => height - padY - ((value - min) / span) * (height - padY * 2)
+    y: value => height - padY - ((value - rangeMin) / span) * (height - padY * 2)
   };
 }
 
 function makeScale(values, width, height, pad) {
-  const min = Math.min(...values, 0);
-  const max = Math.max(...values, 0);
-  const span = max - min || 1;
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const padding = (max - min) * 0.08 || max * 0.01 || 1;
+  const rangeMin = min - padding;
+  const rangeMax = max + padding;
+  const span = rangeMax - rangeMin || 1;
   return {
     x: (index, count) => pad + (index / Math.max(count - 1, 1)) * (width - pad * 2),
-    y: value => height - pad - ((value - min) / span) * (height - pad * 2)
+    y: value => height - pad - ((value - rangeMin) / span) * (height - pad * 2)
   };
 }
 

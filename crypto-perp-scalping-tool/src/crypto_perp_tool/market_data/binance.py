@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import json
+import os
 import threading
 import time
+import urllib.error
 from dataclasses import dataclass
-from typing import Callable
-from urllib.request import urlopen
+from typing import Any, Callable
+from urllib.request import Request, urlopen
 
 from crypto_perp_tool.market_data.events import ForceOrderEvent, MarkPriceEvent, QuoteEvent, SpotPriceEvent, TradeEvent
 
@@ -276,3 +280,141 @@ class BinanceAggTradeClient:
     def _report_status(self, status: str, message: str) -> None:
         if self.on_status is not None:
             self.on_status(status, message)
+
+
+# ------------------------------------------------------------------
+# Authenticated REST client for Binance Futures
+# ------------------------------------------------------------------
+
+
+class BinanceAuthenticatedClient:
+    """Authenticated REST client for Binance Futures signed endpoints.
+
+    Uses HMAC-SHA256 signing. Zero external dependencies — only stdlib urllib, hmac, hashlib.
+    Only instantiated in live mode with explicit confirmation; paper mode returns None
+    from the factory function.
+    """
+
+    MAX_RETRIES = 3
+    RETRY_DELAY_SECONDS = 1.0
+
+    def __init__(self, api_key: str, api_secret: str, base_url: str = "https://fapi.binance.com") -> None:
+        self.api_key = api_key
+        self.api_secret = api_secret
+        self.base_url = base_url.rstrip("/")
+
+    # ------------------------------------------------------------------
+    # Public fetch methods
+    # ------------------------------------------------------------------
+
+    def fetch_positions(self, symbol: str | None = None) -> dict[str, dict[str, Any]]:
+        """Fetch open positions from GET /fapi/v2/positionRisk.
+
+        Returns dict keyed by uppercase symbol, each value with keys:
+        quantity, entry_price, side (long/short), unrealized_pnl, leverage.
+        Zero-quantity positions are filtered out.
+        """
+        params: dict[str, str] = {}
+        if symbol:
+            params["symbol"] = symbol.upper()
+        response = self._signed_request("/fapi/v2/positionRisk", params)
+        positions: dict[str, dict[str, Any]] = {}
+        for item in response:
+            qty = float(item.get("positionAmt", 0))
+            if qty == 0:
+                continue
+            sym = str(item["symbol"]).upper()
+            positions[sym] = {
+                "quantity": abs(qty),
+                "entry_price": float(item.get("entryPrice", 0)),
+                "side": "long" if qty > 0 else "short",
+                "unrealized_pnl": float(item.get("unRealizedProfit", 0)),
+                "leverage": int(float(item.get("leverage", 1))),
+            }
+        return positions
+
+    def fetch_open_orders(self, symbol: str | None = None) -> dict[str, list[dict[str, Any]]]:
+        """Fetch open orders from GET /fapi/v1/openOrders.
+
+        Returns dict keyed by uppercase symbol, each value a list of order dicts.
+        """
+        params: dict[str, str] = {}
+        if symbol:
+            params["symbol"] = symbol.upper()
+        response = self._signed_request("/fapi/v1/openOrders", params)
+        orders: dict[str, list[dict[str, Any]]] = {}
+        for item in response:
+            sym = str(item["symbol"]).upper()
+            orders.setdefault(sym, []).append({
+                "orderId": item.get("orderId"),
+                "symbol": sym,
+                "type": item.get("type", ""),
+                "side": item.get("side", ""),
+                "price": float(item.get("price", 0)),
+                "stopPrice": float(item.get("stopPrice", 0)),
+                "quantity": float(item.get("origQty", 0)),
+                "reduceOnly": bool(item.get("reduceOnly", False)),
+                "status": item.get("status", ""),
+            })
+        return orders
+
+    # ------------------------------------------------------------------
+    # Request signing
+    # ------------------------------------------------------------------
+
+    def _signed_request(self, endpoint: str, params: dict[str, str]) -> Any:
+        params["timestamp"] = str(int(time.time() * 1000))
+        params["recvWindow"] = str(5000)
+        query = "&".join(f"{k}={v}" for k, v in sorted(params.items()))
+        signature = hmac.new(
+            self.api_secret.encode("utf-8"), query.encode("utf-8"), hashlib.sha256
+        ).hexdigest()
+        url = f"{self.base_url}{endpoint}?{query}&signature={signature}"
+
+        last_exc: Exception | None = None
+        delay = self.RETRY_DELAY_SECONDS
+        for attempt in range(1, self.MAX_RETRIES + 1):
+            try:
+                req = Request(url, headers={"X-MBX-APIKEY": self.api_key})
+                with urlopen(req, timeout=10) as resp:
+                    return json.loads(resp.read().decode("utf-8"))
+            except urllib.error.HTTPError as exc:
+                if exc.code == 418:
+                    raise RuntimeError("Binance HTTP 418: IP banned") from exc
+                if exc.code == 429:
+                    last_exc = exc
+                    if attempt < self.MAX_RETRIES:
+                        time.sleep(delay)
+                        delay *= 2
+                    continue
+                raise RuntimeError(f"Binance HTTP {exc.code}: {exc.reason}") from exc
+            except Exception as exc:
+                last_exc = exc
+                if attempt < self.MAX_RETRIES:
+                    time.sleep(delay)
+                    delay *= 2
+
+        raise RuntimeError(f"Binance request failed after {self.MAX_RETRIES} retries: rate limit") from last_exc
+
+
+def create_authenticated_client_if_live(settings: Any) -> BinanceAuthenticatedClient | None:
+    """Factory that returns a BinanceAuthenticatedClient only when all safety gates pass.
+
+    Returns None unless ALL of:
+    - settings.mode == "live"
+    - LIVE_TRADING_CONFIRMATION env var is set
+    - BINANCE_FUTURES_API_KEY env var is set
+    - BINANCE_FUTURES_API_SECRET env var is set
+    """
+    from crypto_perp_tool.config import Settings
+    if not isinstance(settings, Settings):
+        return None
+    if settings.mode != "live":
+        return None
+    if os.getenv("LIVE_TRADING_CONFIRMATION") != "I_UNDERSTAND_LIVE_RISK":
+        return None
+    api_key = os.getenv("BINANCE_FUTURES_API_KEY", "")
+    api_secret = os.getenv("BINANCE_FUTURES_API_SECRET", "")
+    if not api_key or not api_secret:
+        return None
+    return BinanceAuthenticatedClient(api_key=api_key, api_secret=api_secret)

@@ -70,6 +70,23 @@ class BacktestReporterTests(unittest.TestCase):
         self.assertEqual(report.profit_factor, 0.0)
         self.assertEqual(report.data_quality["closed_positions"], "missing")
 
+    def test_report_includes_config_version_when_provided(self):
+        details = {
+            "paper": {
+                "signals": [],
+                "orders": [],
+                "closed_positions": [],
+            }
+        }
+        reporter = BacktestReporter(initial_equity=10_000, config_version="abc123def456")
+        report = reporter.from_details(details)
+        self.assertEqual(report.config_version, "abc123def456")
+
+    def test_report_config_version_empty_by_default(self):
+        reporter = BacktestReporter(initial_equity=10_000)
+        report = reporter.from_details({"paper": {}})
+        self.assertEqual(report.config_version, "")
+
 
 if __name__ == "__main__":
     unittest.main()

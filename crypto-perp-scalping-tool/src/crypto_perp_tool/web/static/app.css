@@ -256,10 +256,10 @@ button {
 
 .workspace {
   display: grid;
-  grid-template-columns: minmax(0, 1.3fr) minmax(280px, 0.7fr);
+  grid-template-columns: 1fr;
   grid-template-areas:
-    "price profile"
-    "delta profile";
+    "price"
+    "delta";
   margin-bottom: 16px;
 }
 
@@ -269,10 +269,6 @@ button {
 
 .chart-panel:nth-child(2) {
   grid-area: delta;
-}
-
-.profile-panel {
-  grid-area: profile;
 }
 
 .panel {
@@ -295,52 +291,11 @@ canvas {
 }
 
 #priceCanvas {
-  height: clamp(180px, 36vh, 360px);
+  height: clamp(260px, 50vh, 520px);
 }
 
 #deltaCanvas {
   height: clamp(140px, 24vh, 220px);
-}
-
-.levels {
-  display: grid;
-  gap: 8px;
-}
-
-.level-row {
-  display: grid;
-  grid-template-columns: 46px 1fr 72px;
-  gap: 8px;
-  align-items: center;
-  min-height: 30px;
-}
-
-.badge {
-  color: #111;
-  border-radius: 4px;
-  padding: 4px 6px;
-  font-size: 12px;
-  text-align: center;
-  font-weight: 700;
-}
-
-.bar {
-  height: 8px;
-  border-radius: 4px;
-  background: var(--panel-2);
-  overflow: hidden;
-}
-
-.bar span {
-  display: block;
-  height: 100%;
-  background: var(--accent);
-}
-
-.price {
-  text-align: right;
-  color: var(--muted);
-  font-variant-numeric: tabular-nums;
 }
 
 .tape-panel {
@@ -416,12 +371,11 @@ td:nth-child(2) {
     grid-template-columns: 1fr;
     grid-template-areas:
       "price"
-      "delta"
-      "profile";
+      "delta";
   }
 
   #priceCanvas {
-    height: 210px;
+    height: 240px;
   }
 
   #deltaCanvas {

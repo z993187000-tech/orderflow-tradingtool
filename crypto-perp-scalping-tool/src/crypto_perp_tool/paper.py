@@ -42,11 +42,12 @@ class PaperPosition:
 
 
 class PaperRunner:
-    def __init__(self, equity: float, journal_path: Path | str, trade_log_path: Path | str | None = None) -> None:
+    def __init__(self, equity: float, journal_path: Path | str, trade_log_path: Path | str | None = None, taker_fee_rate: float = 0.0004) -> None:
         self.settings = default_settings()
         self.equity = equity
-        self.journal = JsonlJournal(journal_path)
+        self.journal = JsonlJournal(journal_path, config_version=self.settings.config_version)
         self.trade_log = TradeLogger(trade_log_path) if trade_log_path is not None else None
+        self.taker_fee_rate = taker_fee_rate
         self.risk = RiskEngine(self.settings.risk)
         self.signals = SignalEngine(self.settings.signals.min_reward_risk, self.settings.execution.max_data_lag_ms)
 
@@ -72,8 +73,11 @@ class PaperRunner:
                 self._update_max_moves(position, event.price)
                 exit_reason, close_price = self._close_trigger(position, event.price)
                 if close_price is not None:
-                    pnl = self._position_pnl(position, close_price)
-                    realized_pnl += pnl
+                    gross_pnl = self._position_pnl(position, close_price)
+                    entry_fee = abs(position.entry_price * position.quantity) * self.taker_fee_rate
+                    exit_fee = abs(close_price * position.quantity) * self.taker_fee_rate
+                    net_pnl = gross_pnl - entry_fee - exit_fee
+                    realized_pnl += net_pnl
                     closed_positions += 1
                     self.journal.write(
                         "position_closed",
@@ -84,10 +88,14 @@ class PaperRunner:
                             "quantity": position.quantity,
                             "entry_price": position.entry_price,
                             "close_price": close_price,
-                            "realized_pnl": pnl,
+                            "entry_fee": entry_fee,
+                            "exit_fee": exit_fee,
+                            "gross_pnl": gross_pnl,
+                            "net_pnl": net_pnl,
+                            "realized_pnl": net_pnl,
                         },
                     )
-                    self._write_trade_record(position, event.timestamp, close_price, pnl, exit_reason)
+                    self._write_trade_record(position, event.timestamp, close_price, gross_pnl, net_pnl, exit_reason)
                     position = None
 
             profile.add_trade(event.price, event.quantity)
@@ -230,10 +238,12 @@ class PaperRunner:
             position.max_adverse_move = adverse
 
     def _write_trade_record(
-        self, position: PaperPosition, exit_time: int, exit_price: float, net_pnl: float, exit_reason: str,
+        self, position: PaperPosition, exit_time: int, exit_price: float, gross_pnl: float, net_pnl: float, exit_reason: str,
     ) -> None:
         if self.trade_log is None:
             return
+        entry_fee = abs(position.entry_price * position.quantity) * self.taker_fee_rate
+        exit_fee = abs(exit_price * position.quantity) * self.taker_fee_rate
         record = make_trade_record(
             signal_id=position.signal_id,
             setup=position.setup,
@@ -242,7 +252,7 @@ class PaperRunner:
             entry_time=position.opened_at,
             entry_price=position.entry_price,
             quantity=position.quantity,
-            entry_fee=0.0,
+            entry_fee=entry_fee,
             signal_entry_price=position.entry_price,
             initial_stop_price=position.initial_stop_price or position.stop_price,
             stop_price=position.stop_price,
@@ -250,8 +260,8 @@ class PaperRunner:
             exit_time=exit_time,
             exit_price=exit_price,
             exit_reason=exit_reason,
-            exit_fee=0.0,
-            gross_pnl=net_pnl,
+            exit_fee=exit_fee,
+            gross_pnl=gross_pnl,
             net_pnl=net_pnl,
             max_favorable_move=position.max_favorable_move,
             max_adverse_move=position.max_adverse_move,

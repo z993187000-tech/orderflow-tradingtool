@@ -22,11 +22,13 @@ class BacktestReport:
     average_slippage_bps: float
     by_setup: dict[str, dict[str, Any]] = field(default_factory=dict)
     data_quality: dict[str, str] = field(default_factory=dict)
+    config_version: str = ""
 
 
 class BacktestReporter:
-    def __init__(self, initial_equity: float = 10_000) -> None:
+    def __init__(self, initial_equity: float = 10_000, config_version: str = "") -> None:
         self.initial_equity = initial_equity
+        self.config_version = config_version
 
     def from_details(self, details: dict[str, Any]) -> BacktestReport:
         paper = details.get("paper") or {}
@@ -59,6 +61,7 @@ class BacktestReporter:
             average_slippage_bps=self._average_slippage(orders),
             by_setup=self._by_setup(closed, signals),
             data_quality=self._data_quality(closed, orders, signals),
+            config_version=self.config_version,
         )
 
     def _average_r(self, closed: list[dict[str, Any]]) -> float:

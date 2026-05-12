@@ -1,6 +1,10 @@
+import hashlib
+import json
 from dataclasses import dataclass
 import os
 from typing import Any
+
+from crypto_perp_tool.serialization import to_jsonable
 
 
 @dataclass(frozen=True)
@@ -63,10 +67,23 @@ class Settings:
     profile: ProfileSettings
     signals: SignalSettings
     safety_warnings: tuple[str, ...] = ()
+    config_version: str = ""
+
+
+def _compute_config_version(settings: Settings) -> str:
+    """Generate a short hash of strategy-critical parameters for version tracking."""
+    payload = to_jsonable({
+        "risk": settings.risk,
+        "execution": settings.execution,
+        "profile": settings.profile,
+        "signals": settings.signals,
+    })
+    canonical = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(canonical.encode()).hexdigest()[:12]
 
 
 def default_settings() -> Settings:
-    return Settings(
+    base = Settings(
         exchange="binance_futures",
         mode="paper",
         symbols=("BTCUSDT", "ETHUSDT"),
@@ -74,6 +91,16 @@ def default_settings() -> Settings:
         execution=ExecutionSettings(),
         profile=ProfileSettings(),
         signals=SignalSettings(),
+    )
+    return Settings(
+        exchange=base.exchange,
+        mode=base.mode,
+        symbols=base.symbols,
+        risk=base.risk,
+        execution=base.execution,
+        profile=base.profile,
+        signals=base.signals,
+        config_version=_compute_config_version(base),
     )
 
 
@@ -92,7 +119,7 @@ def load_settings(overrides: dict[str, Any] | None = None) -> Settings:
     if isinstance(symbols, list):
         symbols = tuple(symbols)
 
-    return Settings(
+    settings = Settings(
         exchange=str(overrides.get("exchange", base.exchange)),
         mode=mode,
         symbols=symbols,
@@ -101,4 +128,15 @@ def load_settings(overrides: dict[str, Any] | None = None) -> Settings:
         profile=base.profile,
         signals=base.signals,
         safety_warnings=tuple(warnings),
+    )
+    return Settings(
+        exchange=settings.exchange,
+        mode=settings.mode,
+        symbols=settings.symbols,
+        risk=settings.risk,
+        execution=settings.execution,
+        profile=settings.profile,
+        signals=settings.signals,
+        safety_warnings=settings.safety_warnings,
+        config_version=_compute_config_version(settings),
     )

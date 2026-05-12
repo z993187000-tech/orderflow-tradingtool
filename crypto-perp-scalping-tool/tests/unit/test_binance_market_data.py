@@ -192,5 +192,94 @@ class BinanceMarketDataTests(unittest.TestCase):
         _INSTRUMENT_SPEC_CACHE.clear()
 
 
+class BinanceAuthenticatedClientTests(unittest.TestCase):
+    def test_factory_returns_none_in_paper_mode(self):
+        from crypto_perp_tool.config import default_settings
+        from crypto_perp_tool.market_data.binance import create_authenticated_client_if_live
+        client = create_authenticated_client_if_live(default_settings())
+        self.assertIsNone(client)
+
+    def test_factory_returns_none_without_env_vars(self):
+        from crypto_perp_tool.config import load_settings
+        from crypto_perp_tool.market_data.binance import create_authenticated_client_if_live
+        with unittest.mock.patch.dict("os.environ", {}, clear=True):
+            settings = load_settings({"mode": "live"})
+            client = create_authenticated_client_if_live(settings)
+        self.assertIsNone(client)
+
+    def test_fetch_positions_parses_response(self):
+        import io
+        import json
+        from unittest.mock import patch
+        from crypto_perp_tool.market_data.binance import BinanceAuthenticatedClient
+
+        fake_response = json.dumps([
+            {"symbol": "BTCUSDT", "positionAmt": "0.010", "entryPrice": "96000.0",
+             "unRealizedProfit": "15.50", "leverage": "3"},
+            {"symbol": "ETHUSDT", "positionAmt": "-0.500", "entryPrice": "3200.0",
+             "unRealizedProfit": "-5.25", "leverage": "2"},
+            {"symbol": "BNBUSDT", "positionAmt": "0.000", "entryPrice": "0",
+             "unRealizedProfit": "0", "leverage": "1"},
+        ]).encode()
+
+        with patch("crypto_perp_tool.market_data.binance.urlopen", return_value=io.BytesIO(fake_response)):
+            client = BinanceAuthenticatedClient(api_key="k", api_secret="s")
+            positions = client.fetch_positions()
+            self.assertIn("BTCUSDT", positions)
+            self.assertEqual(positions["BTCUSDT"]["side"], "long")
+            self.assertEqual(positions["BTCUSDT"]["quantity"], 0.01)
+            self.assertIn("ETHUSDT", positions)
+            self.assertEqual(positions["ETHUSDT"]["side"], "short")
+            self.assertNotIn("BNBUSDT", positions)
+
+    def test_fetch_open_orders_parses_response(self):
+        import io
+        import json
+        from unittest.mock import patch
+        from crypto_perp_tool.market_data.binance import BinanceAuthenticatedClient
+
+        fake_response = json.dumps([
+            {"symbol": "BTCUSDT", "orderId": 123, "type": "STOP_MARKET", "side": "SELL",
+             "price": "0", "stopPrice": "95500", "origQty": "0.01",
+             "reduceOnly": True, "status": "NEW"},
+        ]).encode()
+
+        with patch("crypto_perp_tool.market_data.binance.urlopen", return_value=io.BytesIO(fake_response)):
+            client = BinanceAuthenticatedClient(api_key="k", api_secret="s")
+            orders = client.fetch_open_orders(symbol="BTCUSDT")
+            self.assertIn("BTCUSDT", orders)
+            self.assertEqual(orders["BTCUSDT"][0]["type"], "STOP_MARKET")
+            self.assertTrue(orders["BTCUSDT"][0]["reduceOnly"])
+
+    def test_http_418_raises_immediately(self):
+        import urllib.error
+        from unittest.mock import patch
+        from crypto_perp_tool.market_data.binance import BinanceAuthenticatedClient
+
+        def raise_418(req, timeout=None):
+            raise urllib.error.HTTPError(url="https://fapi.binance.com/test", code=418, msg="IP banned", hdrs={}, fp=None)
+
+        with patch("crypto_perp_tool.market_data.binance.urlopen", side_effect=raise_418):
+            client = BinanceAuthenticatedClient(api_key="k", api_secret="s")
+            with self.assertRaises(RuntimeError) as ctx:
+                client.fetch_positions(symbol="BTCUSDT")
+            self.assertIn("418", str(ctx.exception))
+
+    def test_http_429_retries_then_raises(self):
+        import urllib.error
+        from unittest.mock import patch
+        from crypto_perp_tool.market_data.binance import BinanceAuthenticatedClient
+
+        def raise_429(req, timeout=None):
+            raise urllib.error.HTTPError(url="https://fapi.binance.com/test", code=429, msg="Rate limited", hdrs={}, fp=None)
+
+        with patch("crypto_perp_tool.market_data.binance.urlopen", side_effect=raise_429):
+            client = BinanceAuthenticatedClient(api_key="k", api_secret="s")
+            client.RETRY_DELAY_SECONDS = 0.001
+            with self.assertRaises(RuntimeError) as ctx:
+                client.fetch_positions(symbol="BTCUSDT")
+            self.assertIn("rate limit", str(ctx.exception).lower())
+
+
 if __name__ == "__main__":
     unittest.main()

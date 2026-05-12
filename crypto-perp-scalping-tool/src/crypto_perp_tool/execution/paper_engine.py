@@ -37,6 +37,7 @@ class PaperOpenPosition:
     initial_stop_price: float
     target_price: float
     opened_at: int
+    entry_fee: float = 0.0
     break_even_shifted: bool = False
     absorption_reduced: bool = False
 
@@ -57,10 +58,12 @@ class PaperTradingEngine:
         signal_cooldown_ms: int = 60_000,
         journal_path: Path | str | None = None,
         execution_config: PaperExecutionConfig | None = None,
+        taker_fee_rate: float = 0.0004,
     ) -> None:
         self.symbol = symbol.upper()
         self.initial_equity = equity
         self.signal_cooldown_ms = signal_cooldown_ms
+        self.taker_fee_rate = taker_fee_rate
         self.settings = default_settings()
         self.bin_size = self.settings.profile.btc_bin_size if self.symbol == "BTCUSDT" else self.settings.profile.eth_bin_size
         self.rolling_window_ms = self.settings.profile.rolling_window_minutes * 60 * 1000
@@ -68,7 +71,7 @@ class PaperTradingEngine:
         self.signals = SignalEngine(self.settings.signals.min_reward_risk, self.settings.execution.max_data_lag_ms,
                                     session_gating_enabled=self.settings.signals.session_gating_enabled)
         self.execution_config = execution_config or PaperExecutionConfig()
-        self.journal = JsonlJournal(journal_path) if journal_path is not None else None
+        self.journal = JsonlJournal(journal_path, config_version=self.settings.config_version) if journal_path is not None else None
         self._events: list[TradeEvent] = []
         self._rolling_delta: list[float] = []
         self._position: PaperOpenPosition | None = None
@@ -152,13 +155,20 @@ class PaperTradingEngine:
     def summary(self) -> dict[str, Any]:
         paper = self._details["paper"]
         last_price = self._events[-1].price if self._events else 0.0
+        equity = self.initial_equity + self._realized_pnl
+        pnl_percent_24h = (paper["pnl_by_range"]["24h"] / self.initial_equity * 100) if self.initial_equity else 0.0
+        pnl_percent_all = (self._realized_pnl / self.initial_equity * 100) if self.initial_equity else 0.0
         return to_jsonable(
             {
                 "signals": len(paper["signals"]),
                 "orders": len(paper["orders"]),
                 "closed_positions": len(paper["closed_positions"]),
                 "realized_pnl": self._realized_pnl,
+                "pnl_percent_all": pnl_percent_all,
                 "pnl_24h": paper["pnl_by_range"]["24h"],
+                "pnl_percent_24h": pnl_percent_24h,
+                "equity": equity,
+                "initial_equity": self.initial_equity,
                 "seen_trade_count": len(self._events),
                 "profile_trade_count": len(self._profile_events(self._last_event_time)),
                 "data_lag_ms": max(0, self._last_received_at - self._last_event_time),
@@ -320,6 +330,7 @@ class PaperTradingEngine:
             return
 
         fill_price = self._entry_fill_price(signal)
+        entry_fee = abs(fill_price * filled_quantity) * self.taker_fee_rate
         order_status = "filled" if fill_ratio >= 1.0 else "partially_filled"
         self._position = PaperOpenPosition(
             signal_id=signal.id,
@@ -332,6 +343,7 @@ class PaperTradingEngine:
             initial_stop_price=signal.stop_price,
             target_price=signal.target_price,
             opened_at=signal.created_at,
+            entry_fee=entry_fee,
         )
         self._details["paper"]["orders"].append(
             {
@@ -348,6 +360,7 @@ class PaperTradingEngine:
                 "status": order_status,
                 "fill_ratio": fill_ratio,
                 "slippage_bps": self.execution_config.entry_slippage_bps,
+                "entry_fee": entry_fee,
             }
         )
         if fill_ratio < 1.0:
@@ -362,6 +375,7 @@ class PaperTradingEngine:
                 "fill_price": fill_price,
                 "fill_ratio": fill_ratio,
                 "slippage_bps": self.execution_config.entry_slippage_bps,
+                "entry_fee": entry_fee,
             },
         )
         self._write_journal(
@@ -376,6 +390,7 @@ class PaperTradingEngine:
                 "stop_price": signal.stop_price,
                 "target_price": signal.target_price,
                 "status": order_status,
+                "entry_fee": entry_fee,
             },
         )
         if not self.execution_config.stop_submission_success:
@@ -416,13 +431,19 @@ class PaperTradingEngine:
         if reduce_quantity <= 0 or reduce_quantity >= position.quantity:
             return
         close_fill_price = self._exit_fill_price(position, event.price)
-        reduce_pnl = self._position_pnl(position, close_fill_price) * (reduce_quantity / position.quantity)
-        self._realized_pnl += reduce_pnl
+        gross_pnl = self._position_pnl(position, close_fill_price) * (reduce_quantity / position.quantity)
+        entry_fee_portion = position.entry_fee * (reduce_quantity / position.quantity)
+        exit_fee = abs(close_fill_price * reduce_quantity) * self.taker_fee_rate
+        net_pnl = gross_pnl - entry_fee_portion - exit_fee
+        self._realized_pnl += net_pnl
         self._record_risk_event("absorption_detected", event.timestamp)
         position.quantity -= reduce_quantity
+        position.entry_fee -= entry_fee_portion
         position.absorption_reduced = True
+        entry_notional = position.entry_price * reduce_quantity
+        pnl_percent = (net_pnl / entry_notional * 100) if entry_notional else 0.0
         self._details["paper"]["pnl_events"].append(
-            {"timestamp": event.timestamp, "symbol": position.symbol, "side": position.side.value, "realized_pnl": reduce_pnl}
+            {"timestamp": event.timestamp, "symbol": position.symbol, "side": position.side.value, "realized_pnl": net_pnl, "pnl_percent": pnl_percent}
         )
         self._details["paper"]["closed_positions"].append(
             {
@@ -431,7 +452,12 @@ class PaperTradingEngine:
                 "quantity": reduce_quantity, "entry_price": position.entry_price,
                 "close_price": close_fill_price, "stop_price": position.stop_price,
                 "target_price": position.target_price,
-                "realized_pnl": reduce_pnl, "net_realized_pnl": reduce_pnl,
+                "entry_fee": entry_fee_portion,
+                "exit_fee": exit_fee,
+                "gross_pnl": gross_pnl,
+                "net_pnl": net_pnl,
+                "pnl_percent": pnl_percent,
+                "realized_pnl": net_pnl, "net_realized_pnl": net_pnl,
                 "exit_reason": "absorption_reduce",
             }
         )
@@ -452,9 +478,13 @@ class PaperTradingEngine:
         position = self._position
         self._position = None
         fill_price = self._exit_fill_price(position, close_price)
-        realized_pnl = self._position_pnl(position, fill_price)
-        self._realized_pnl += realized_pnl
-        self._consecutive_losses = self._consecutive_losses + 1 if realized_pnl < 0 else 0
+        gross_pnl = self._position_pnl(position, fill_price)
+        exit_fee = abs(fill_price * position.quantity) * self.taker_fee_rate
+        net_pnl = gross_pnl - position.entry_fee - exit_fee
+        self._realized_pnl += net_pnl
+        self._consecutive_losses = self._consecutive_losses + 1 if net_pnl < 0 else 0
+        entry_notional = position.entry_price * position.quantity
+        pnl_percent = (net_pnl / entry_notional * 100) if entry_notional else 0.0
         closed = {
             "signal_id": position.signal_id,
             "timestamp": event.timestamp,
@@ -466,7 +496,12 @@ class PaperTradingEngine:
             "close_price": fill_price,
             "stop_price": position.stop_price,
             "target_price": position.target_price,
-            "realized_pnl": realized_pnl,
+            "entry_fee": position.entry_fee,
+            "exit_fee": exit_fee,
+            "gross_pnl": gross_pnl,
+            "net_pnl": net_pnl,
+            "pnl_percent": pnl_percent,
+            "realized_pnl": net_pnl,
             "opened_at": position.opened_at,
             "slippage_bps": self.execution_config.exit_slippage_bps,
         }
@@ -476,7 +511,8 @@ class PaperTradingEngine:
                 "timestamp": event.timestamp,
                 "symbol": position.symbol,
                 "side": position.side.value,
-                "realized_pnl": realized_pnl,
+                "realized_pnl": net_pnl,
+                "pnl_percent": pnl_percent,
             }
         )
         self._markers.append(
@@ -484,7 +520,7 @@ class PaperTradingEngine:
                 "type": "position_closed",
                 "timestamp": event.timestamp,
                 "price": fill_price,
-                "label": f"PnL {realized_pnl:.2f}",
+                "label": f"PnL {net_pnl:.2f} ({pnl_percent:+.2f}%)",
                 "side": position.side.value,
             }
         )
@@ -499,8 +535,12 @@ class PaperTradingEngine:
         position = self._position
         self._position = None
         close_price = self._exit_fill_price(position, position.entry_price)
-        realized_pnl = self._position_pnl(position, close_price)
-        self._realized_pnl += realized_pnl
+        gross_pnl = self._position_pnl(position, close_price)
+        exit_fee = abs(close_price * position.quantity) * self.taker_fee_rate
+        net_pnl = gross_pnl - position.entry_fee - exit_fee
+        self._realized_pnl += net_pnl
+        entry_notional = position.entry_price * position.quantity
+        pnl_percent = (net_pnl / entry_notional * 100) if entry_notional else 0.0
         closed = {
             "signal_id": position.signal_id,
             "timestamp": timestamp,
@@ -512,7 +552,12 @@ class PaperTradingEngine:
             "close_price": close_price,
             "stop_price": position.stop_price,
             "target_price": position.target_price,
-            "realized_pnl": realized_pnl,
+            "entry_fee": position.entry_fee,
+            "exit_fee": exit_fee,
+            "gross_pnl": gross_pnl,
+            "net_pnl": net_pnl,
+            "pnl_percent": pnl_percent,
+            "realized_pnl": net_pnl,
             "opened_at": position.opened_at,
             "exit_reason": "protective_close",
             "slippage_bps": self.execution_config.exit_slippage_bps,
@@ -523,7 +568,8 @@ class PaperTradingEngine:
                 "timestamp": timestamp,
                 "symbol": position.symbol,
                 "side": position.side.value,
-                "realized_pnl": realized_pnl,
+                "realized_pnl": net_pnl,
+                "pnl_percent": pnl_percent,
             }
         )
         self._write_journal("position_closed", closed)
@@ -682,6 +728,7 @@ class PaperTradingEngine:
                 "status": str(order.get("status") or "filled"),
                 "fill_ratio": float(order.get("fill_ratio") or 1),
                 "slippage_bps": float(order.get("slippage_bps") or 0),
+                "entry_fee": float(order.get("entry_fee") or 0),
             }
         )
         self._position = PaperOpenPosition(
@@ -695,6 +742,7 @@ class PaperTradingEngine:
             initial_stop_price=stop_price,
             target_price=target_price,
             opened_at=timestamp,
+            entry_fee=float(order.get("entry_fee") or 0),
         )
 
     def _restore_closed_position(self, closed: dict[str, Any], journal_time: int) -> None:
@@ -702,7 +750,7 @@ class PaperTradingEngine:
             return
         timestamp = int(closed.get("timestamp") or journal_time)
         side = str(closed.get("side") or "")
-        realized_pnl = float(closed.get("realized_pnl") or 0)
+        realized_pnl = float(closed.get("net_pnl") or closed.get("realized_pnl") or 0)
         restored_closed = {
             "signal_id": str(closed.get("signal_id") or ""),
             "timestamp": timestamp,
@@ -714,6 +762,11 @@ class PaperTradingEngine:
             "close_price": float(closed.get("close_price") or 0),
             "stop_price": float(closed.get("stop_price") or 0),
             "target_price": float(closed.get("target_price") or 0),
+            "entry_fee": float(closed.get("entry_fee") or 0),
+            "exit_fee": float(closed.get("exit_fee") or 0),
+            "gross_pnl": float(closed.get("gross_pnl") or realized_pnl),
+            "net_pnl": realized_pnl,
+            "pnl_percent": float(closed.get("pnl_percent") or 0),
             "realized_pnl": realized_pnl,
             "opened_at": int(closed.get("opened_at") or timestamp),
         }
