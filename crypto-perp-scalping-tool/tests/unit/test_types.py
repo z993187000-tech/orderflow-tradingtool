@@ -12,7 +12,7 @@ class HistoricalWindowsTests(unittest.TestCase):
 
 
 class MarketDataHealthTests(unittest.TestCase):
-    def test_is_stale_when_latency_exceeds_max(self):
+    def test_high_latency_alone_is_not_websocket_stale(self):
         now = int(time.time() * 1000)
         health = MarketDataHealth(
             connection_status="connected",
@@ -20,7 +20,8 @@ class MarketDataHealthTests(unittest.TestCase):
             last_local_time=now + 2500,
             latency_ms=2500,
         )
-        self.assertTrue(health.is_stale(max_data_lag_ms=2000))
+        self.assertFalse(health.is_stale(max_data_lag_ms=2000))
+        self.assertGreater(health.latency_ms, 2000)
 
     def test_is_not_stale_when_within_limits(self):
         now = int(time.time() * 1000)

@@ -27,6 +27,7 @@ const els = {
   cvdDivergence: document.getElementById("cvdDivergence"),
   cvdDivergenceMeta: document.getElementById("cvdDivergenceMeta"),
   dataLag: document.getElementById("dataLag"),
+  streamFreshness: document.getElementById("streamFreshness"),
   lastTradeTime: document.getElementById("lastTradeTime"),
   connection: document.getElementById("connection"),
   circuitResume: document.getElementById("circuitResumeButton"),
@@ -53,6 +54,7 @@ const colors = {
 };
 
 const REFRESH_INTERVAL_MS = 2000;
+const LARGE_TAPE_MIN_QTY = 10;
 const modeLabels = {
   paper: "Paper / 模拟",
   live: "Live / 实盘"
@@ -84,7 +86,11 @@ async function loadDashboard() {
     renderSummary(data.summary);
     drawPrice(els.priceCanvas, data.trades, data.markers, data.profile_levels, data.klines);
     drawDelta(els.deltaCanvas, data.delta_series);
-    renderTape(data.trades.slice(-12).reverse());
+    const largeTapeTrades = data.trades
+      .filter(trade => trade.quantity >= LARGE_TAPE_MIN_QTY)
+      .slice(-12)
+      .reverse();
+    renderTape(largeTapeTrades);
     if (!els.detailPanel.classList.contains("is-hidden")) renderDetailPanel();
   } catch (error) {
     els.connection.textContent = "error";
@@ -115,17 +121,25 @@ function renderSummary(summary) {
   els.signalReasons.textContent = reasonText(summary.signal_reasons);
   els.rejectReasons.textContent = reasonText(summary.reject_reasons);
   renderStrategyState(summary);
-  if (summary.data_lag_ms < 0) {
+  const exchangeLag = summary.exchange_lag_ms ?? summary.data_lag_ms;
+  const exchangeLagMin = summary.exchange_lag_min_ms ?? summary.lag_min_ms ?? exchangeLag;
+  if (exchangeLag === undefined || exchangeLag < 0) {
     els.dataLag.textContent = "N/A";
-    els.dataLag.title = "replay mode / 回放模式";
+    els.dataLag.title = "exchange lag unavailable in replay mode / 回放模式无交易所延迟";
   } else {
-    const minLag = summary.lag_min_ms ?? summary.data_lag_ms;
-    els.dataLag.textContent = `${formatNumber(summary.data_lag_ms)} ms`;
-    if (summary.data_lag_ms - minLag > 3000 && minLag < 1000) {
-      els.dataLag.title = `median ${formatNumber(summary.data_lag_ms)}ms / min ${formatNumber(minLag)}ms — clock skew possible / 时钟可能偏移`;
+    els.dataLag.textContent = `${formatNumber(exchangeLag)} ms`;
+    if (exchangeLag - exchangeLagMin > 3000 && exchangeLagMin < 1000) {
+      els.dataLag.title = `median ${formatNumber(exchangeLag)}ms / min ${formatNumber(exchangeLagMin)}ms — clock skew possible / 时钟可能偏移`;
     } else {
-      els.dataLag.title = `median ${formatNumber(summary.data_lag_ms)}ms / min ${formatNumber(minLag)}ms`;
+      els.dataLag.title = `median exchange lag ${formatNumber(exchangeLag)}ms / min ${formatNumber(exchangeLagMin)}ms`;
     }
+  }
+  if (summary.stream_freshness_ms === undefined || summary.stream_freshness_ms < 0) {
+    els.streamFreshness.textContent = "N/A";
+    els.streamFreshness.title = "stream freshness unavailable in replay mode / 回放模式无流新鲜度";
+  } else {
+    els.streamFreshness.textContent = `${formatNumber(summary.stream_freshness_ms)} ms`;
+    els.streamFreshness.title = `local time since last received trade / 距离本地上次收到成交 ${formatNumber(summary.stream_freshness_ms)}ms`;
   }
   els.lastTradeTime.textContent = formatTimestamp(summary.last_trade_time);
   els.connection.textContent = summary.connection_status || summary.source || "csv";
@@ -276,10 +290,11 @@ function recordRow(kind, record) {
 function drawPrice(canvas, trades, markers, profileLevels, klines) {
   const ctx = setupCanvas(canvas);
   if (!trades.length) return;
-  const histogramWidth = (profileLevels && profileLevels.length) ? 72 : 0;
+  const selectedProfileLevels = latestProfileLevels(profileLevels);
+  const histogramWidth = selectedProfileLevels.length ? 72 : 0;
   const chartRight = canvas.width - histogramWidth;
 
-  const profilePrices = (profileLevels || []).map(l => l.price).filter(p => Number.isFinite(Number(p)));
+  const profilePrices = selectedProfileLevels.map(l => l.price).filter(p => Number.isFinite(Number(p)));
   let prices, timestamps, minTs, maxTs;
 
   if (klines && klines.length) {
@@ -299,7 +314,7 @@ function drawPrice(canvas, trades, markers, profileLevels, klines) {
   drawGrid(ctx, canvas);
   drawYAxis(ctx, canvas, scale, prices);
   drawTimeAxis(ctx, canvas, scale, minTs, maxTs);
-  drawProfileLines(ctx, canvas, scale, profileLevels);
+  drawProfileLines(ctx, canvas, scale, selectedProfileLevels);
 
   if (klines && klines.length) {
     drawKlines(ctx, klines, scale, chartRight);
@@ -338,7 +353,7 @@ function drawPrice(canvas, trades, markers, profileLevels, klines) {
     ctx.fillText(marker.label || marker.type, Math.min(x + 8, chartRight - 90), labelY);
   });
 
-  if (histogramWidth > 0) drawVolumeProfileHistogram(ctx, canvas, scale, profileLevels, histogramWidth);
+  if (histogramWidth > 0) drawVolumeProfileHistogram(ctx, canvas, scale, selectedProfileLevels, histogramWidth);
 }
 
 function drawKlines(ctx, klines, scale, chartRight) {
@@ -372,6 +387,23 @@ function drawKlines(ctx, klines, scale, chartRight) {
   }
 }
 
+function latestProfileLevels(profileLevels) {
+  const latestByType = {};
+  for (const level of profileLevels || []) {
+    const existing = latestByType[level.type];
+    if (!existing || profileLevelRank(level) > profileLevelRank(existing)) {
+      latestByType[level.type] = level;
+    }
+  }
+  return Object.values(latestByType);
+}
+
+function profileLevelRank(level) {
+  const touchedAt = Number(level.touched_at);
+  if (Number.isFinite(touchedAt) && touchedAt > 0) return touchedAt;
+  return Number(level.strength) || 0;
+}
+
 function drawProfileLines(ctx, canvas, scale, profileLevels) {
   if (!profileLevels || !profileLevels.length) return;
   const lineColors = { POC: "#e7b84b", HVN: "#36c98a", LVN: "#ef5b5b", VAH: "#4fb6d8", VAL: "#4fb6d8" };
@@ -380,15 +412,7 @@ function drawProfileLines(ctx, canvas, scale, profileLevels) {
   ctx.textAlign = "right";
   ctx.font = "11px Segoe UI, Arial";
 
-  const bestByType = {};
   for (const level of profileLevels) {
-    const existing = bestByType[level.type];
-    if (!existing || level.strength > existing.strength) {
-      bestByType[level.type] = level;
-    }
-  }
-
-  for (const level of Object.values(bestByType)) {
     const y = scale.y(level.price);
     if (y < 10 || y > canvas.height - 10) continue;
     const color = lineColors[level.type] || "#aaa69b";
@@ -477,20 +501,7 @@ function drawDelta(canvas, series) {
 
 function drawVolumeProfileHistogram(ctx, canvas, scale, profileLevels, histWidth) {
   if (!profileLevels || !profileLevels.length) return;
-  const maxHvnLvn = 5;
-  const seen = new Set();
-  const deduped = [];
-  const hvnLvnCount = { HVN: 0, LVN: 0 };
-  for (const level of profileLevels) {
-    const key = `${level.type}:${level.price}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    if ((level.type === "HVN" || level.type === "LVN") && hvnLvnCount[level.type] >= maxHvnLvn) continue;
-    if (level.type === "HVN") hvnLvnCount.HVN += 1;
-    if (level.type === "LVN") hvnLvnCount.LVN += 1;
-    deduped.push(level);
-  }
-  const maxStrength = Math.max(...deduped.map(l => l.strength), 1);
+  const maxStrength = Math.max(...profileLevels.map(l => l.strength), 1);
   const colorFor = { POC: colors.warn, HVN: colors.buy, LVN: colors.sell, VAH: colors.price, VAL: colors.price };
   const labelX = canvas.width - 4;
   const barAreaLeft = canvas.width - histWidth + 4;
@@ -498,13 +509,13 @@ function drawVolumeProfileHistogram(ctx, canvas, scale, profileLevels, histWidth
   ctx.textAlign = "right";
   ctx.font = "10px Segoe UI, Arial";
 
-  for (const level of deduped) {
+  for (const level of profileLevels) {
     const y = scale.y(level.price);
     if (y < 8 || y > canvas.height - 8) continue;
     const color = colorFor[level.type] || colors.price;
     const barWidth = Math.max(4, Math.round((level.strength / maxStrength) * (histWidth - 16)));
     const barY = y - 2;
-    const barH = Math.max(3, Math.min(6, (canvas.height - 56) / Math.max(deduped.length, 1)));
+    const barH = Math.max(3, Math.min(6, (canvas.height - 56) / Math.max(profileLevels.length, 1)));
 
     ctx.fillStyle = color;
     ctx.globalAlpha = 0.35;

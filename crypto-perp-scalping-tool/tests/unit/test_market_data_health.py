@@ -27,14 +27,15 @@ class MarketDataHealthTests(unittest.TestCase):
         )
         self.assertEqual(health.reconnect_count, 3)
 
-    def test_health_detects_high_latency(self):
+    def test_health_does_not_treat_high_exchange_lag_as_websocket_stale(self):
         now = int(time.time() * 1000)
         health = compute_health(
             connection_status="connected",
             last_event_time=now - 100,
             last_local_time=now + 2000,
         )
-        self.assertTrue(health.is_stale(max_data_lag_ms=1500))
+        self.assertFalse(health.is_stale(max_data_lag_ms=1500))
+        self.assertGreater(health.latency_ms, 1500)
 
     def test_health_detects_stale_connection(self):
         now = int(time.time() * 1000)
