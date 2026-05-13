@@ -66,6 +66,28 @@ def main(argv: list[str] | None = None) -> int:
     replay_run.add_argument("--start", type=int, help="Start timestamp ms for time-range filter")
     replay_run.add_argument("--end", type=int, help="End timestamp ms for time-range filter")
 
+    data_parser = subparsers.add_parser("data")
+    data_sub = data_parser.add_subparsers(dest="data_command", required=True)
+    download_parser = data_sub.add_parser("download")
+    download_parser.add_argument("--symbol", default="BTCUSDT")
+    download_parser.add_argument("--output", required=True, help="Path to output CSV file")
+    download_parser.add_argument("--start", help="Start time in ISO format or timestamp ms")
+    download_parser.add_argument("--end", help="End time in ISO format or timestamp ms")
+    download_parser.add_argument("--pages", type=int, default=50, help="Max pagination pages (1000 trades each)")
+
+    backtest_parser = subparsers.add_parser("backtest")
+    backtest_sub = backtest_parser.add_subparsers(dest="backtest_command", required=True)
+    backtest_run = backtest_sub.add_parser("run")
+    backtest_run.add_argument("--csv", required=True, help="Path to CSV trade data")
+    backtest_run.add_argument("--symbol", default="BTCUSDT")
+    backtest_run.add_argument("--equity", type=float, default=10_000)
+    backtest_run.add_argument("--entry-slippage", type=float, default=2.0, help="Entry slippage in bps")
+    backtest_run.add_argument("--exit-slippage", type=float, default=3.0, help="Exit slippage in bps")
+    backtest_run.add_argument("--fee", type=float, default=4.0, help="Taker fee in bps")
+    backtest_run.add_argument("--split", type=float, default=0.0, help="IS fraction for walk-forward (0=disabled, 0.6=60%25 IS)")
+    backtest_run.add_argument("--start", type=int, help="Start timestamp ms for time filter")
+    backtest_run.add_argument("--end", type=int, help="End timestamp ms for time filter")
+
     web_parser = subparsers.add_parser("web")
     web_sub = web_parser.add_subparsers(dest="web_command", required=True)
     serve_parser = web_sub.add_parser("serve")
@@ -96,6 +118,29 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "journal" and args.journal_command == "tail":
         events = JsonlJournal(Path(args.path)).tail(limit=args.limit)
         print(json.dumps(to_jsonable(events), ensure_ascii=False, indent=2))
+        return 0
+
+    if args.command == "data" and args.data_command == "download":
+        import csv
+        from crypto_perp_tool.market_data.binance import BinanceHistoricalAggTradeClient
+
+        start_ms = _parse_time(args.start)
+        end_ms = _parse_time(args.end)
+        client = BinanceHistoricalAggTradeClient()
+        trades = client.download(args.symbol, start_time=start_ms, end_time=end_ms, max_pages=args.pages)
+
+        output = Path(args.output)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        with output.open("w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=["timestamp", "symbol", "price", "quantity", "is_buyer_maker"])
+            writer.writeheader()
+            for t in trades:
+                writer.writerow({
+                    "timestamp": t.timestamp, "symbol": t.symbol,
+                    "price": t.price, "quantity": t.quantity,
+                    "is_buyer_maker": t.is_buyer_maker,
+                })
+        print(f"Downloaded {len(trades)} aggTrades to {output}")
         return 0
 
     if args.command == "risk" and args.risk_command == "check":
@@ -169,6 +214,47 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(to_jsonable(payload), ensure_ascii=False, indent=2))
         return 0
 
+    if args.command == "backtest" and args.backtest_command == "run":
+        from crypto_perp_tool.backtest import BacktestConfig, BacktestEngine
+        events = BacktestEngine.load_csv(Path(args.csv), symbol=args.symbol)
+        config = BacktestConfig(
+            symbol=args.symbol,
+            equity=args.equity,
+            start_ms=args.start,
+            end_ms=args.end,
+            entry_slippage_bps=args.entry_slippage,
+            exit_slippage_bps=args.exit_slippage,
+            fee_bps=args.fee,
+            is_fraction=args.split if args.split > 0 else 0.0,
+            oos_fraction=(1.0 - args.split) if args.split > 0 else 0.0,
+        )
+        engine = BacktestEngine(config=config)
+        if config.is_fraction > 0:
+            is_result, oos_result = engine.run_split(events)
+            print(json.dumps(to_jsonable({
+                "symbol": args.symbol,
+                "total_events": is_result.total_events + oos_result.total_events,
+                "in_sample": _format_backtest_result(is_result),
+                "out_of_sample": _format_backtest_result(oos_result),
+                "walk_forward_efficiency": round(
+                    (oos_result.report.profit_factor / is_result.report.profit_factor)
+                    if is_result.report and is_result.report.profit_factor > 0 else 0.0, 4),
+            }), ensure_ascii=False, indent=2))
+        else:
+            result = engine.run(events)
+            print(json.dumps(to_jsonable({
+                "symbol": result.symbol,
+                "total_events": result.total_events,
+                "equity_start": result.equity_start,
+                "equity_end": result.equity_end,
+                "total_return_pct": result.total_return_pct,
+                "data_quality": result.data_quality,
+                "config_version": result.config_version,
+                "report": result.report,
+                "trade_count": len(result.trade_records),
+            }), ensure_ascii=False, indent=2))
+        return 0
+
     if args.command == "replay" and args.replay_command == "run":
         if not Path(args.journal).exists():
             print(f"Error: journal file not found: {args.journal}")
@@ -212,6 +298,42 @@ def main(argv: list[str] | None = None) -> int:
 
     parser.error("unsupported command")
     return 2
+
+
+def _format_backtest_result(result) -> dict:
+    report = result.report
+    return {
+        "equity_start": result.equity_start,
+        "equity_end": result.equity_end,
+        "total_return_pct": result.total_return_pct,
+        "total_events": result.total_events,
+        "total_trades": report.total_trades if report else 0,
+        "win_rate": report.win_rate if report else 0.0,
+        "profit_factor": report.profit_factor if report else 0.0,
+        "net_pnl": report.net_pnl if report else 0.0,
+        "average_r": report.average_r if report else 0.0,
+        "max_drawdown": report.max_drawdown if report else 0.0,
+        "max_consecutive_losses": report.max_consecutive_losses if report else 0,
+        "errors": result.errors,
+    }
+
+
+def _parse_time(value: str | None) -> int | None:
+    """Parse a timestamp argument: ISO format string or raw milliseconds integer."""
+    if value is None:
+        return None
+    value = value.strip()
+    if value.isdigit() or (value.startswith("-") and value[1:].isdigit()):
+        return int(value)
+    # Try ISO format like "2026-05-01T00:00:00" or "2026-05-01"
+    from datetime import datetime, timezone
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+        try:
+            dt = datetime.strptime(value, fmt)
+            return int(dt.replace(tzinfo=timezone.utc).timestamp() * 1000)
+        except ValueError:
+            continue
+    raise ValueError(f"Cannot parse time: {value}")
 
 
 def _load_replay_csv(path: Path, symbol: str) -> list:

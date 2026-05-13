@@ -51,3 +51,19 @@ class ForceOrderEvent:
     quantity: float
     side: str
     order_type: str = "LIQUIDATION"
+
+
+@dataclass(frozen=True)
+class KlineEvent:
+    timestamp: int
+    close_time: int
+    symbol: str
+    interval: str
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float
+    quote_volume: float
+    trade_count: int
+    is_closed: bool

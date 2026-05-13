@@ -18,10 +18,10 @@ class BinanceMarketDataTests(unittest.TestCase):
     def test_stream_url_uses_usdm_futures_aggtrade_stream(self):
         config = BinanceStreamConfig(symbol="BTCUSDT")
 
-        self.assertEqual(config.market_streams, ("btcusdt@aggTrade", "btcusdt@markPrice@1s", "btcusdt@forceOrder"))
+        self.assertEqual(config.market_streams, ("btcusdt@aggTrade", "btcusdt@markPrice@1s", "btcusdt@forceOrder", "btcusdt@kline_5m"))
         self.assertEqual(config.public_streams, ("btcusdt@bookTicker",))
         self.assertEqual(config.spot_streams, ("btcusdt@trade",))
-        self.assertEqual(config.market_url, "wss://fstream.binance.com/market/stream?streams=btcusdt@aggTrade/btcusdt@markPrice@1s/btcusdt@forceOrder")
+        self.assertEqual(config.market_url, "wss://fstream.binance.com/market/stream?streams=btcusdt@aggTrade/btcusdt@markPrice@1s/btcusdt@forceOrder/btcusdt@kline_5m")
         self.assertEqual(config.public_url, "wss://fstream.binance.com/public/stream?streams=btcusdt@bookTicker")
         self.assertEqual(config.spot_url, "wss://stream.binance.com:9443/stream?streams=btcusdt@trade")
 
@@ -279,6 +279,46 @@ class BinanceAuthenticatedClientTests(unittest.TestCase):
             with self.assertRaises(RuntimeError) as ctx:
                 client.fetch_positions(symbol="BTCUSDT")
             self.assertIn("rate limit", str(ctx.exception).lower())
+
+
+class BinanceHistoricalAggTradeClientTests(unittest.TestCase):
+    def test_fetch_returns_parsed_trade_events(self):
+        import io
+        import json
+        from unittest.mock import patch
+        from crypto_perp_tool.market_data.binance import BinanceHistoricalAggTradeClient
+
+        fake_response = json.dumps([
+            {"a": 1001, "p": "96000.00", "q": "0.500", "T": 1700000000000, "m": False},
+            {"a": 1002, "p": "96010.00", "q": "1.200", "T": 1700000001000, "m": True},
+        ]).encode()
+
+        with patch("crypto_perp_tool.market_data.binance.urlopen", return_value=io.BytesIO(fake_response)):
+            client = BinanceHistoricalAggTradeClient()
+            trades = client.download("BTCUSDT", max_pages=1)
+
+        self.assertEqual(len(trades), 2)
+        self.assertEqual(trades[0].symbol, "BTCUSDT")
+        self.assertEqual(trades[0].price, 96000.00)
+        self.assertFalse(trades[0].is_buyer_maker)
+        self.assertEqual(trades[1].quantity, 1.2)
+        self.assertTrue(trades[1].is_buyer_maker)
+
+    def test_fetch_builds_correct_url(self):
+        from unittest.mock import MagicMock
+        from crypto_perp_tool.market_data.binance import BinanceHistoricalAggTradeClient
+
+        client = BinanceHistoricalAggTradeClient()
+        fake_loader = MagicMock(return_value=[])
+        client.loader = fake_loader
+
+        client.fetch("btcusdt", start_time=1700000000000, end_time=1700000100000, limit=500)
+        url = fake_loader.call_args[0][0]
+        self.assertIn("symbol=BTCUSDT", url)
+        self.assertIn("startTime=1700000000000", url)
+        self.assertIn("endTime=1700000100000", url)
+        self.assertIn("limit=500", url)
+        self.assertIn("/fapi/v1/aggTrades", url)
 
 
 if __name__ == "__main__":

@@ -34,9 +34,9 @@ class BinanceStreamConfig:
     spot_base_url: str = "wss://stream.binance.com:9443/stream"
 
     @property
-    def market_streams(self) -> tuple[str, str, str]:
+    def market_streams(self) -> tuple[str, ...]:
         symbol = self.symbol.lower()
-        return (f"{symbol}@aggTrade", f"{symbol}@markPrice@1s", f"{symbol}@forceOrder")
+        return (f"{symbol}@aggTrade", f"{symbol}@markPrice@1s", f"{symbol}@forceOrder", f"{symbol}@kline_5m")
 
     @property
     def public_streams(self) -> tuple[str, ...]:
@@ -114,6 +114,27 @@ class BinanceSpotTradeParser:
         )
 
 
+class BinanceKlineParser:
+    def parse(self, payload: dict) -> "KlineEvent":
+        from crypto_perp_tool.market_data.events import KlineEvent
+
+        k = payload["k"]
+        return KlineEvent(
+            timestamp=int(k["t"]),
+            close_time=int(k["T"]),
+            symbol=str(k["s"]).upper(),
+            interval=str(k["i"]),
+            open=float(k["o"]),
+            high=float(k["h"]),
+            low=float(k["l"]),
+            close=float(k["c"]),
+            volume=float(k["v"]),
+            quote_volume=float(k["q"]),
+            trade_count=int(k["n"]),
+            is_closed=bool(k["x"]),
+        )
+
+
 class BinanceExchangeInfoParser:
     def parse_symbol(self, payload: dict, symbol: str) -> BinanceInstrumentSpec:
         symbol = symbol.upper()
@@ -185,6 +206,7 @@ class BinanceAggTradeClient:
         on_mark: Callable[[MarkPriceEvent], None] | None = None,
         on_spot: Callable[[SpotPriceEvent], None] | None = None,
         on_force_order: Callable[[ForceOrderEvent], None] | None = None,
+        on_kline: Callable[["KlineEvent"], None] | None = None,
         on_status: Callable[[str, str], None] | None = None,
         reconnect_delay_seconds: float = 3.0,
     ) -> None:
@@ -194,6 +216,7 @@ class BinanceAggTradeClient:
         self.on_mark = on_mark
         self.on_spot = on_spot
         self.on_force_order = on_force_order
+        self.on_kline = on_kline
         self.on_status = on_status
         self.reconnect_delay_seconds = reconnect_delay_seconds
         self.parser = BinanceAggTradeParser()
@@ -201,6 +224,7 @@ class BinanceAggTradeClient:
         self.mark_parser = BinanceMarkPriceParser()
         self.force_order_parser = BinanceForceOrderParser()
         self.spot_parser = BinanceSpotTradeParser()
+        self.kline_parser = BinanceKlineParser()
         self._stop = threading.Event()
 
     def start_background(self) -> threading.Thread:
@@ -276,6 +300,10 @@ class BinanceAggTradeClient:
         if event_type == "trade" or stream.endswith("@trade"):
             if self.on_spot is not None:
                 self.on_spot(self.spot_parser.parse(data))
+            return
+        if event_type == "kline" or stream.endswith("@kline_5m"):
+            if self.on_kline is not None:
+                self.on_kline(self.kline_parser.parse(data))
 
     def _report_status(self, status: str, message: str) -> None:
         if self.on_status is not None:
@@ -418,3 +446,94 @@ def create_authenticated_client_if_live(settings: Any) -> BinanceAuthenticatedCl
     if not api_key or not api_secret:
         return None
     return BinanceAuthenticatedClient(api_key=api_key, api_secret=api_secret)
+
+
+class BinanceHistoricalAggTradeClient:
+    """Downloads historical aggTrades from the public REST endpoint.
+
+    GET /fapi/v1/aggTrades — no API key required. Same urlopen/loader
+    injection pattern as BinanceExchangeInfoClient.
+    """
+
+    BASE_URL = "https://fapi.binance.com"
+    MAX_LIMIT = 1000
+
+    def __init__(
+        self,
+        base_url: str | None = None,
+        timeout_seconds: float = 10.0,
+        loader: Callable[[str, float], list] | None = None,
+    ) -> None:
+        self.base_url = (base_url or self.BASE_URL).rstrip("/")
+        self.timeout_seconds = timeout_seconds
+        self.loader = loader or self._load_json
+
+    def _load_json(self, url: str, timeout: float) -> list:
+        proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
+        last_err = None
+        for attempt in range(3):
+            try:
+                if proxy:
+                    handler = urllib.request.ProxyHandler({"https": proxy, "http": proxy.replace("https", "http")})
+                    opener = urllib.request.build_opener(handler)
+                    req = Request(url, headers={"User-Agent": "crypto-perp-tool"})
+                    with opener.open(req, timeout=timeout) as response:
+                        return json.loads(response.read().decode("utf-8"))
+                req = Request(url, headers={"User-Agent": "crypto-perp-tool"})
+                with urlopen(req, timeout=timeout) as response:
+                    return json.loads(response.read().decode("utf-8"))
+            except Exception as exc:
+                last_err = exc
+                if attempt < 2:
+                    time.sleep(1.0 * (attempt + 1))
+        raise last_err  # type: ignore[misc]
+
+    def fetch(
+        self, symbol: str, start_time: int | None = None,
+        end_time: int | None = None, from_id: int | None = None,
+        limit: int = MAX_LIMIT,
+    ) -> list[dict]:
+        """Fetch one page of raw aggTrade JSON dicts."""
+        params = [f"symbol={symbol.upper()}", f"limit={min(limit, self.MAX_LIMIT)}"]
+        if start_time is not None:
+            params.append(f"startTime={start_time}")
+        if end_time is not None:
+            params.append(f"endTime={end_time}")
+        if from_id is not None:
+            params.append(f"fromId={from_id}")
+        url = f"{self.base_url}/fapi/v1/aggTrades?{'&'.join(params)}"
+        return self.loader(url, self.timeout_seconds)
+
+    def download(
+        self, symbol: str, start_time: int | None = None,
+        end_time: int | None = None, max_pages: int = 200,
+    ) -> list[TradeEvent]:
+        """Paginate through historical aggTrades and return TradeEvents."""
+        trades: list[TradeEvent] = []
+        from_id: int | None = None
+        sym = symbol.upper()
+
+        for page in range(max_pages):
+            # Only page 0 uses start_time; fromId+endTime together → HTTP 400
+            st = start_time if page == 0 else None
+            et = end_time if page == 0 else None
+            batch = self.fetch(symbol=sym, start_time=st, end_time=et, from_id=from_id)
+            if not batch:
+                break
+
+            for row in batch:
+                ts = int(row["T"])
+                if end_time and ts > end_time:
+                    break
+                trades.append(TradeEvent(
+                    timestamp=ts, symbol=sym,
+                    price=float(row["p"]), quantity=float(row["q"]),
+                    is_buyer_maker=bool(row["m"]),
+                ))
+
+            if end_time and int(batch[-1]["T"]) > end_time:
+                break
+            from_id = int(batch[-1]["a"])
+            time.sleep(0.15)
+
+        return trades

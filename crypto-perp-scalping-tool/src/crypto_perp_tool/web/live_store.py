@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 import threading
 import time
@@ -17,6 +18,7 @@ from crypto_perp_tool.market_data import (
     AtrTracker,
     FlashCrashDetector,
     ForceOrderEvent,
+    KlineEvent,
     MarkPriceEvent,
     QuoteEvent,
     SpotPriceEvent,
@@ -70,6 +72,7 @@ class LiveOrderflowStore:
         equity: float = 10_000,
         instrument_spec: BinanceInstrumentSpec | None = None,
         testing_mode: bool = False,
+        state_path: Path | str | None = None,
     ) -> None:
         self.symbol = symbol.upper()
         self.max_events = max_events
@@ -112,6 +115,7 @@ class LiveOrderflowStore:
         self._last_event_time = 0
         self._last_received_at = 0
         self._recent_lags: deque[int] = deque(maxlen=20)
+        self._klines: deque[KlineEvent] = deque(maxlen=500)
         self._last_delta_15s = 0.0
         self._last_delta_30s = 0.0
         self._last_delta_60s = 0.0
@@ -140,10 +144,13 @@ class LiveOrderflowStore:
             ny_end_hour=self.settings.profile.ny_end_hour,
         )
         self._flash_crash_detector = FlashCrashDetector()
+        self._state_path = Path(state_path) if state_path is not None else None
+        self._last_state_save_ms = 0
         self._last_signal_time = -1
         self._signal_cooldown_ms = 30_000
         self._last_signal_reasons: tuple[str, ...] = ()
         self._last_reject_reasons: tuple[str, ...] = ()
+        self._restored_state_info = self._restore_state()
 
     def add_trade(self, event: TradeEvent, received_at: int | None = None) -> None:
         if event.symbol.upper() != self.symbol:
@@ -175,8 +182,13 @@ class LiveOrderflowStore:
                         "price": event.price,
                         "label": "FLASH CRASH",
                     })
+                    self._save_state()
             self._try_signal(event, received_at)
             self._refresh_pnl_ranges()
+            now_ms = int(time.time() * 1000)
+            if now_ms - self._last_state_save_ms > 60_000:
+                self._save_state()
+                self._last_state_save_ms = now_ms
 
     def add_force_order(self, event: ForceOrderEvent) -> None:
         if event.symbol.upper() != self.symbol:
@@ -202,6 +214,12 @@ class LiveOrderflowStore:
         with self._lock:
             self._spot = event
 
+    def add_kline(self, event: KlineEvent) -> None:
+        if event.symbol.upper() != self.symbol:
+            return
+        with self._lock:
+            self._klines.append(event)
+
     def set_connection_status(self, status: str, message: str) -> None:
         with self._lock:
             previous = self._connection_status
@@ -224,6 +242,7 @@ class LiveOrderflowStore:
                 return {"resumed": False, "reason": "resume conditions not met"}
             event = self._circuit_breaker.resume(actor=actor)
             self._write_journal("circuit_breaker_resumed", event)
+            self._save_state()
             return {"resumed": True, "state": self._circuit_breaker.state}
 
     def _refresh_indicators(self, timestamp: int) -> None:
@@ -358,8 +377,12 @@ class LiveOrderflowStore:
             return 0
         sorted_lags = sorted(self._recent_lags)
         n = len(sorted_lags)
-        mid = sorted_lags[n // 2] if n % 2 else (sorted_lags[n // 2 - 1] + sorted_lags[n // 2]) // 2
-        return min(mid, 5_000)
+        return sorted_lags[n // 2] if n % 2 else (sorted_lags[n // 2 - 1] + sorted_lags[n // 2]) // 2
+
+    def _min_recent_lag(self) -> int:
+        if not self._recent_lags:
+            return 0
+        return min(self._recent_lags)
 
     def _spread_bps(self, event: TradeEvent) -> float:
         return self._spread_bps_from_quote()
@@ -593,6 +616,7 @@ class LiveOrderflowStore:
         reduce_position_ctx = dict(position)
         reduce_position_ctx["quantity"] = quantity
         self._write_trade_record(reduce_position_ctx, event.timestamp, close_fill, gross_pnl, net_pnl, reason)
+        self._save_state()
 
     def _try_close(self, event: TradeEvent) -> None:
         if self._position is None:
@@ -646,6 +670,7 @@ class LiveOrderflowStore:
         self._write_journal("position_closed", closed)
         self._write_journal("pnl", {"signal_id": position["signal_id"], "symbol": position["symbol"], "realized_pnl": net_pnl})
         self._write_trade_record(position, event.timestamp, close_fill, gross_pnl, net_pnl, exit_reason)
+        self._save_state()
 
     def _triggered_close(self, current_price: float) -> tuple[float | None, str | None]:
         if self._position is None:
@@ -768,6 +793,246 @@ class LiveOrderflowStore:
         )
         self._trade_log.write(record)
 
+    def save_state(self, paused: bool = False) -> None:
+        """Public state save, lock-wrapped for use from external callers."""
+        with self._lock:
+            self._save_state(paused=paused)
+
+    def _save_state(self, paused: bool = False) -> None:
+        if self._state_path is None:
+            return
+        state = self._build_state_dict(paused)
+        tmp_path = self._state_path.with_suffix(".tmp")
+        tmp_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp_path.replace(self._state_path)
+
+    def _build_state_dict(self, paused: bool = False) -> dict[str, Any]:
+        cb = self._circuit_breaker
+        return {
+            "state_format_version": 1,
+            "config_version": self.settings.config_version,
+            "symbol": self.symbol,
+            "saved_at_ms": int(time.time() * 1000),
+            "account": {
+                "realized_pnl": self._realized_pnl,
+                "consecutive_losses": self._consecutive_losses,
+            },
+            "counters": {
+                "signal_count": self._signal_count,
+                "order_count": self._order_count,
+                "rejected_count": self._rejected_count,
+                "closed_positions": self._closed_positions,
+            },
+            "circuit_breaker": {
+                "state": cb.state,
+                "reason": cb.reason.value if cb.reason else None,
+                "tripped_at_ms": cb.tripped_at,
+                "cooldown_until_ms": cb.cooldown_until,
+            },
+            "trading_service": {"paused": paused},
+            "open_position": to_jsonable(deepcopy(self._position)) if self._position is not None else None,
+            "cumulative_delta": self._cumulative_delta,
+            "last_signal_time_ms": self._last_signal_time,
+            "last_event_time_ms": self._last_event_time,
+            "connection": {
+                "status": self._connection_status,
+                "message": self._connection_message,
+                "reconnect_count": self._reconnect_count,
+            },
+            "last_signal_reasons": list(self._last_signal_reasons),
+            "last_reject_reasons": list(self._last_reject_reasons),
+            "details": to_jsonable(deepcopy(self._details)),
+            "markers": to_jsonable(deepcopy(self._markers)),
+        }
+
+    def _restore_state(self) -> dict[str, Any]:
+        if self._state_path is not None and self._state_path.exists():
+            return self._restore_from_state_file()
+        return self._restore_from_journal()
+
+    def _restore_from_state_file(self) -> dict[str, Any]:
+        try:
+            state = json.loads(self._state_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return self._restore_from_journal()
+        if state.get("state_format_version") != 1:
+            return self._restore_from_journal()
+        self._realized_pnl = float(state["account"]["realized_pnl"])
+        self._consecutive_losses = int(state["account"]["consecutive_losses"])
+        self._signal_count = int(state["counters"]["signal_count"])
+        self._order_count = int(state["counters"]["order_count"])
+        self._rejected_count = int(state["counters"]["rejected_count"])
+        self._closed_positions = int(state["counters"]["closed_positions"])
+        cb = state["circuit_breaker"]
+        if cb["state"] == "tripped" and cb["reason"]:
+            reason = CircuitBreakerReason(cb["reason"])
+            self._circuit_breaker.trip(reason)
+            self._circuit_breaker.tripped_at = cb.get("tripped_at_ms") or 0
+            self._circuit_breaker.cooldown_until = cb.get("cooldown_until_ms") or 0
+        elif cb["state"] == "normal":
+            self._circuit_breaker._state = "normal"
+        if state.get("open_position") is not None:
+            self._position = self._restore_position(state["open_position"])
+        self._cumulative_delta = float(state.get("cumulative_delta", 0.0))
+        self._last_signal_time = int(state.get("last_signal_time_ms", -1))
+        self._last_event_time = int(state.get("last_event_time_ms", 0))
+        conn = state.get("connection", {})
+        self._connection_status = conn.get("status", "starting")
+        self._connection_message = conn.get("message", "waiting for Binance stream")
+        self._reconnect_count = int(conn.get("reconnect_count", 0))
+        self._last_signal_reasons = tuple(state.get("last_signal_reasons", ()))
+        self._last_reject_reasons = tuple(state.get("last_reject_reasons", ()))
+        if state.get("details"):
+            self._details = state["details"]
+            if "live" not in self._details or not self._details["live"]:
+                from crypto_perp_tool.web.details import _empty_mode_details
+                self._details["live"] = _empty_mode_details()
+        if state.get("markers"):
+            self._markers = state["markers"]
+        if state.get("config_version") != self.settings.config_version:
+            self._details["paper"]["signals"] = []
+            self._details["paper"]["orders"] = []
+            self._details["paper"]["closed_positions"] = []
+            self._details["paper"]["pnl_events"] = []
+            self._details["paper"]["pnl_by_range"] = {"24h": 0.0, "7d": 0.0, "30d": 0.0, "all": 0.0}
+            self._details["paper"]["risk_events"] = []
+            self._details["paper"]["protective_actions"] = []
+            self._markers = []
+            self._signal_count = 0
+            self._order_count = 0
+            self._rejected_count = 0
+            self._closed_positions = 0
+            print(f"[LiveOrderflowStore {self.symbol}] config_version changed — resetting details/markers, keeping PnL")
+        self._refresh_pnl_ranges()
+        return {"paused": bool(state.get("trading_service", {}).get("paused", False))}
+
+    def _restore_position(self, pos: dict[str, Any]) -> dict[str, Any]:
+        if pos is None:
+            return None
+        restored = dict(pos)
+        side = restored.get("side", "long")
+        if isinstance(side, str):
+            restored["side"] = SignalSide(side)
+        return restored
+
+    def _restore_from_journal(self) -> dict[str, Any]:
+        if self._journal is None or not self._journal.path.exists():
+            return {"paused": False}
+        from crypto_perp_tool.web.details import build_paper_details_from_journal
+        details = build_paper_details_from_journal(self._journal.path)
+        self._details = details
+        paper = self._details["paper"]
+        self._realized_pnl = paper["pnl_by_range"]["all"]
+        self._consecutive_losses = self._count_consecutive_losses(paper["pnl_events"])
+        self._signal_count = len(paper["signals"])
+        self._order_count = len(paper["orders"])
+        self._closed_positions = len(paper["closed_positions"])
+        signals = paper["signals"]
+        if signals:
+            self._last_signal_time = int(signals[-1].get("timestamp", -1))
+        self._position = self._find_open_position_from_journal()
+        if paper["closed_positions"]:
+            last_close = paper["closed_positions"][-1]
+            self._last_event_time = int(last_close.get("timestamp", 0))
+        self._markers = self._build_markers_from_details(paper)
+        self._refresh_pnl_ranges()
+        return {"paused": False}
+
+    def _count_consecutive_losses(self, pnl_events: list[dict[str, Any]]) -> int:
+        count = 0
+        for event in reversed(pnl_events):
+            if float(event["realized_pnl"]) < 0:
+                count += 1
+            else:
+                break
+        return count
+
+    def _find_open_position_from_journal(self) -> dict[str, Any] | None:
+        if self._journal is None:
+            return None
+        from crypto_perp_tool.web.details import _read_journal
+        open_signal_id: str | None = None
+        open_pos: dict[str, Any] | None = None
+        closed_ids: set[str] = set()
+        for event in _read_journal(self._journal.path):
+            event_type = event.get("type")
+            payload = event.get("payload", {})
+            if event_type == "paper_order":
+                sid = payload.get("signal_id")
+                if sid:
+                    open_signal_id = sid
+                    entry_price = float(payload.get("entry_price") or 0)
+                    stop_price = float(payload.get("stop_price") or 0)
+                    target_price = float(payload.get("target_price") or 0)
+                    qty = float(payload.get("quantity") or 0)
+                    open_pos = {
+                        "signal_id": sid,
+                        "symbol": payload.get("symbol", self.symbol),
+                        "side": SignalSide(payload.get("side", "long")),
+                        "setup": payload.get("setup", "unknown"),
+                        "quantity": qty,
+                        "entry_price": entry_price,
+                        "signal_entry_price": entry_price,
+                        "stop_price": stop_price,
+                        "initial_stop_price": stop_price,
+                        "target_price": target_price,
+                        "entry_fee": 0.0,
+                        "opened_at": int(event.get("time", 0)),
+                        "break_even_shifted": False,
+                        "absorption_reduced": False,
+                        "max_favorable_move": 0.0,
+                        "max_adverse_move": 0.0,
+                        "entry_session": "unknown",
+                        "vwap_at_entry": 0.0,
+                        "atr_at_entry": 0.0,
+                        "spread_bps_at_entry": 0.0,
+                        "poc_at_entry": 0.0,
+                        "vah_at_entry": 0.0,
+                        "val_at_entry": 0.0,
+                    }
+            elif event_type in {"position_closed", "position_reduced"}:
+                sid = payload.get("signal_id")
+                if sid:
+                    closed_ids.add(sid)
+        if open_signal_id and open_signal_id not in closed_ids and open_pos is not None:
+            return open_pos
+        return None
+
+    def _build_markers_from_details(self, paper: dict[str, Any]) -> list[dict[str, Any]]:
+        markers: list[dict[str, Any]] = []
+        for signal in paper.get("signals", []):
+            markers.append({
+                "type": "signal",
+                "timestamp": signal.get("timestamp", 0),
+                "price": signal.get("entry_price", 0),
+                "label": signal.get("setup", "signal"),
+            })
+        for closed in paper.get("closed_positions", []):
+            markers.append({
+                "type": "position_closed",
+                "timestamp": closed.get("timestamp", 0),
+                "price": closed.get("close_price", 0),
+                "label": f"PnL {closed.get('realized_pnl', 0):.2f}",
+            })
+        for action in paper.get("protective_actions", []):
+            if action.get("action") == "break_even_shift":
+                markers.append({
+                    "type": "break_even_shift",
+                    "timestamp": action.get("timestamp", 0),
+                    "price": action.get("stop_price", 0),
+                    "label": "BE",
+                    "side": action.get("side", "long"),
+                })
+            elif action.get("action") == "absorption_reduce":
+                markers.append({
+                    "type": "absorption_reduce",
+                    "timestamp": action.get("timestamp", 0),
+                    "price": action.get("trigger_price", 0),
+                    "label": "Absorb reduce",
+                    "side": action.get("side", "long"),
+                })
+        return markers
+
     def _record_risk_event(self, event_type: str, timestamp: int, payload: dict[str, Any] | None = None) -> None:
         event = {"timestamp": timestamp, "type": event_type}
         if payload:
@@ -796,13 +1061,14 @@ class LiveOrderflowStore:
             last_signal_reasons = list(self._last_signal_reasons)
             last_reject_reasons = list(self._last_reject_reasons)
             last_bubble = to_jsonable(deepcopy(self._last_bubble))
+            klines = list(self._klines)
 
         cumulative_delta = 0.0
         trades: list[dict[str, Any]] = []
         delta_series: list[dict[str, Any]] = []
-        four_hours_ms = 4 * 60 * 60 * 1000
+        eight_hours_ms = 8 * 60 * 60 * 1000
         last_event_time = events[-1].timestamp if events else 0
-        time_window_count = sum(1 for e in events if last_event_time - e.timestamp <= four_hours_ms) if last_event_time else 0
+        time_window_count = sum(1 for e in events if last_event_time - e.timestamp <= eight_hours_ms) if last_event_time else 0
         effective_display = max(self.display_events, time_window_count)
         display_events = events[-effective_display:]
 
@@ -887,6 +1153,7 @@ class LiveOrderflowStore:
                 "signal_reasons": last_signal_reasons,
                 "reject_reasons": last_reject_reasons,
                 "data_lag_ms": self._median_recent_lag(),
+                "lag_min_ms": self._min_recent_lag(),
                 "last_trade_time": self._last_event_time or None,
                 "last_aggression_bubble": last_bubble,
                 "last_break_even_shift": last_break_even_shift,
@@ -896,11 +1163,21 @@ class LiveOrderflowStore:
                 "circuit_reason": self._circuit_breaker.reason.value if self._circuit_breaker.reason else None,
                 "cooldown_until": self._circuit_breaker.cooldown_until,
                 "pnl_24h": total_pnl_for_range(details, "24h"),
+                "pnl_percent_24h": (total_pnl_for_range(details, "24h") / self.equity * 100) if self.equity else 0.0,
+                "pnl_percent_all": (self._realized_pnl / self.equity * 100) if self.equity else 0.0,
                 "mode_breakdown": mode_breakdown(details),
                 "trade_log_path": str(self._trade_log.path) if self._trade_log is not None else None,
             },
             "trades": trades,
             "delta_series": delta_series,
+            "klines": [
+                {
+                    "timestamp": k.timestamp,
+                    "open": k.open, "high": k.high, "low": k.low, "close": k.close,
+                    "volume": k.volume, "is_closed": k.is_closed,
+                }
+                for k in klines
+            ],
             "profile_levels": [
                 {"type": level.type.value, "price": level.price,
                  "lower_bound": level.lower_bound, "upper_bound": level.upper_bound,

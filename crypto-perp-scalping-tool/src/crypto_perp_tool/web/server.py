@@ -173,6 +173,10 @@ def serve_dashboard(
                 paper_journal_path_for_symbol(base_journal_path.with_name("trade-log"), live_symbol)
                 if base_journal_path is not None else None
             )
+            symbol_state_path = (
+                base_journal_path.parent / f"state-{live_symbol.lower()}.json"
+                if base_journal_path is not None else None
+            )
             store = LiveOrderflowStore(
                 symbol=live_symbol,
                 enable_signals=True,
@@ -180,6 +184,7 @@ def serve_dashboard(
                 trade_log_path=symbol_trade_log_path,
                 instrument_spec=fetch_instrument_spec(live_symbol),
                 testing_mode=testing_mode,
+                state_path=symbol_state_path,
             )
             live_stores[live_symbol] = store
             client = BinanceAggTradeClient(
@@ -189,6 +194,7 @@ def serve_dashboard(
                 on_mark=store.add_mark,
                 on_spot=store.add_spot,
                 on_force_order=store.add_force_order,
+                on_kline=store.add_kline,
                 on_status=store.set_connection_status,
             )
             client.start_background()
@@ -202,6 +208,9 @@ def serve_dashboard(
         service = TradingService(journal=telegram_journal)
         allowed_chat_ids = parse_allowed_chat_ids(os.environ.get("TELEGRAM_ALLOWED_CHAT_IDS", ""))
         primary_store = live_stores.get(symbol.upper(), next(iter(live_stores.values())))
+        restore_info = getattr(primary_store, '_restored_state_info', {"paused": False})
+        if restore_info.get("paused"):
+            service.paused = True
         bot_handler = TelegramCommandHandler(service=service, allowed_chat_ids=allowed_chat_ids, store=primary_store)
         poller = TelegramPoller(handler=bot_handler, journal=telegram_journal)
         poller.start()
@@ -216,6 +225,13 @@ def serve_dashboard(
     try:
         server.serve_forever()
     finally:
+        if live_stores is not None:
+            paused = service.paused if 'service' in dir() else False
+            for store in live_stores.values():
+                try:
+                    store.save_state(paused=paused)
+                except Exception:
+                    pass
         if poller is not None:
             poller.stop()
         for client in clients:

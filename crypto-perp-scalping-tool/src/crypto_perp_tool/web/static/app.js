@@ -82,7 +82,7 @@ async function loadDashboard() {
     const data = await response.json();
     latestDashboard = data;
     renderSummary(data.summary);
-    drawPrice(els.priceCanvas, data.trades, data.markers, data.profile_levels);
+    drawPrice(els.priceCanvas, data.trades, data.markers, data.profile_levels, data.klines);
     drawDelta(els.deltaCanvas, data.delta_series);
     renderTape(data.trades.slice(-12).reverse());
     if (!els.detailPanel.classList.contains("is-hidden")) renderDetailPanel();
@@ -107,14 +107,26 @@ function renderSummary(summary) {
   els.ordersSplit.textContent = splitLabel(breakdown, "orders");
   els.closed.textContent = formatNumber(summary.closed_positions);
   els.closedSplit.textContent = splitLabel(breakdown, "closed_positions");
-  els.pnl.textContent = formatNumber(summary.pnl_24h);
+  const pnlPercent = summary.pnl_percent_24h ?? 0;
+  els.pnl.textContent = `${formatNumber(summary.pnl_24h)} (${formatSignedPercent(pnlPercent)})`;
   els.pnl.className = summary.pnl_24h >= 0 ? "buy" : "sell";
   els.pnlSplit.textContent = `模拟 ${formatNumber(breakdown.paper.pnl_24h)} / 实盘 ${formatNumber(breakdown.live.pnl_24h)}`;
   renderPosition(summary.open_position);
   els.signalReasons.textContent = reasonText(summary.signal_reasons);
   els.rejectReasons.textContent = reasonText(summary.reject_reasons);
   renderStrategyState(summary);
-  els.dataLag.textContent = `${formatNumber(summary.data_lag_ms)} ms`;
+  if (summary.data_lag_ms < 0) {
+    els.dataLag.textContent = "N/A";
+    els.dataLag.title = "replay mode / 回放模式";
+  } else {
+    const minLag = summary.lag_min_ms ?? summary.data_lag_ms;
+    els.dataLag.textContent = `${formatNumber(summary.data_lag_ms)} ms`;
+    if (summary.data_lag_ms - minLag > 3000 && minLag < 1000) {
+      els.dataLag.title = `median ${formatNumber(summary.data_lag_ms)}ms / min ${formatNumber(minLag)}ms — clock skew possible / 时钟可能偏移`;
+    } else {
+      els.dataLag.title = `median ${formatNumber(summary.data_lag_ms)}ms / min ${formatNumber(minLag)}ms`;
+    }
+  }
   els.lastTradeTime.textContent = formatTimestamp(summary.last_trade_time);
   els.connection.textContent = summary.connection_status || summary.source || "csv";
   els.connection.title = summary.connection_message || "";
@@ -239,8 +251,8 @@ function renderRecordTable(kind, records) {
 function recordHeader(kind) {
   if (kind === "signals") return "<thead><tr><th>Time / 时间</th><th>Side / 方向</th><th>Setup / 形态</th><th>Entry / 入场</th><th>Reasons / 原因</th></tr></thead>";
   if (kind === "orders") return "<thead><tr><th>Time / 时间</th><th>Side / 方向</th><th>Qty / 数量</th><th>Entry / 入场</th><th>Stop / 止损</th><th>Target / 止盈</th><th>Fee / 手续费</th></tr></thead>";
-  if (kind === "closed_positions") return "<thead><tr><th>Time / 时间</th><th>Side / 方向</th><th>Entry / 入场</th><th>Close / 平仓</th><th>PnL / 盈亏</th></tr></thead>";
-  return "<thead><tr><th>Time / 时间</th><th>Side / 方向</th><th>PnL / 盈亏</th></tr></thead>";
+  if (kind === "closed_positions") return "<thead><tr><th>Time / 时间</th><th>Side / 方向</th><th>Entry / 入场</th><th>Close / 平仓</th><th>PnL / 盈亏</th><th>% / 收益率</th></tr></thead>";
+  return "<thead><tr><th>Time / 时间</th><th>Side / 方向</th><th>PnL / 盈亏</th><th>% / 收益率</th></tr></thead>";
 }
 
 function recordRow(kind, record) {
@@ -253,40 +265,56 @@ function recordRow(kind, record) {
   if (kind === "closed_positions") {
     const pnl = record.net_realized_pnl ?? record.realized_pnl;
     const pnlClass = pnl >= 0 ? "buy" : "sell";
-    return `<tr><td>${formatTimestamp(record.timestamp)}</td><td>${record.side || "--"}</td><td>${formatNumber(record.entry_price)}</td><td>${formatNumber(record.close_price)}</td><td class="${pnlClass}">${formatNumber(pnl)}</td></tr>`;
+    const pct = record.pnl_percent ?? 0;
+    return `<tr><td>${formatTimestamp(record.timestamp)}</td><td>${record.side || "--"}</td><td>${formatNumber(record.entry_price)}</td><td>${formatNumber(record.close_price)}</td><td class="${pnlClass}">${formatNumber(pnl)}</td><td class="${pnlClass}">${formatSignedPercent(pct)}</td></tr>`;
   }
   const pnlClass = record.realized_pnl >= 0 ? "buy" : "sell";
-  return `<tr><td>${formatTimestamp(record.timestamp)}</td><td>${record.side || "--"}</td><td class="${pnlClass}">${formatNumber(record.realized_pnl)}</td></tr>`;
+  const pct = record.pnl_percent ?? 0;
+  return `<tr><td>${formatTimestamp(record.timestamp)}</td><td>${record.side || "--"}</td><td class="${pnlClass}">${formatNumber(record.realized_pnl)}</td><td class="${pnlClass}">${formatSignedPercent(pct)}</td></tr>`;
 }
 
-function drawPrice(canvas, trades, markers, profileLevels) {
+function drawPrice(canvas, trades, markers, profileLevels, klines) {
   const ctx = setupCanvas(canvas);
   if (!trades.length) return;
   const histogramWidth = (profileLevels && profileLevels.length) ? 72 : 0;
   const chartRight = canvas.width - histogramWidth;
-  const prices = trades.map(t => t.price);
-  const timestamps = trades.map(t => t.timestamp);
+
   const profilePrices = (profileLevels || []).map(l => l.price).filter(p => Number.isFinite(Number(p)));
-  const allPrices = prices.concat(profilePrices);
-  const minTs = timestamps[0];
-  const maxTs = timestamps[timestamps.length - 1];
-  const scale = makeTimeScale(allPrices, minTs, maxTs, chartRight, canvas.height, 28, 50);
+  let prices, timestamps, minTs, maxTs;
+
+  if (klines && klines.length) {
+    prices = klines.flatMap(k => [k.high, k.low]).concat(profilePrices);
+    timestamps = klines.map(k => k.timestamp);
+    minTs = timestamps[0];
+    maxTs = timestamps[timestamps.length - 1];
+  } else {
+    prices = trades.map(t => t.price).concat(profilePrices);
+    timestamps = trades.map(t => t.timestamp);
+    minTs = timestamps[0];
+    maxTs = timestamps[timestamps.length - 1];
+  }
+
+  const scale = makeTimeScale(prices, minTs, maxTs, chartRight, canvas.height, 28, 50);
 
   drawGrid(ctx, canvas);
-  drawYAxis(ctx, canvas, scale, allPrices);
+  drawYAxis(ctx, canvas, scale, prices);
   drawTimeAxis(ctx, canvas, scale, minTs, maxTs);
   drawProfileLines(ctx, canvas, scale, profileLevels);
 
-  ctx.strokeStyle = colors.price;
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  trades.forEach((trade, index) => {
-    const x = scale.x(trade.timestamp);
-    const y = scale.y(trade.price);
-    if (index === 0) ctx.moveTo(x, y);
-    else ctx.lineTo(x, y);
-  });
-  ctx.stroke();
+  if (klines && klines.length) {
+    drawKlines(ctx, klines, scale, chartRight);
+  } else {
+    ctx.strokeStyle = colors.price;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    trades.forEach((trade, index) => {
+      const x = scale.x(trade.timestamp);
+      const y = scale.y(trade.price);
+      if (index === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+  }
 
   const placedLabels = [];
   markers.forEach(marker => {
@@ -313,6 +341,37 @@ function drawPrice(canvas, trades, markers, profileLevels) {
   if (histogramWidth > 0) drawVolumeProfileHistogram(ctx, canvas, scale, profileLevels, histogramWidth);
 }
 
+function drawKlines(ctx, klines, scale, chartRight) {
+  const candleCount = klines.length;
+  if (candleCount < 2) return;
+  const slotWidth = (chartRight - 50) / candleCount;
+  const candleWidth = Math.max(1, Math.min(slotWidth * 0.7, 12));
+
+  for (const k of klines) {
+    const x = scale.x(k.timestamp);
+    const openY = scale.y(k.open);
+    const closeY = scale.y(k.close);
+    const highY = scale.y(k.high);
+    const lowY = scale.y(k.low);
+    const bullish = k.close >= k.open;
+    const color = bullish ? colors.buy : colors.sell;
+
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(x, highY);
+    ctx.lineTo(x, lowY);
+    ctx.stroke();
+
+    const bodyTop = Math.min(openY, closeY);
+    const bodyHeight = Math.max(1, Math.abs(closeY - openY));
+    ctx.fillStyle = color;
+    ctx.globalAlpha = 0.85;
+    ctx.fillRect(x - candleWidth / 2, bodyTop, candleWidth, bodyHeight);
+    ctx.globalAlpha = 1;
+  }
+}
+
 function drawProfileLines(ctx, canvas, scale, profileLevels) {
   if (!profileLevels || !profileLevels.length) return;
   const lineColors = { POC: "#e7b84b", HVN: "#36c98a", LVN: "#ef5b5b", VAH: "#4fb6d8", VAL: "#4fb6d8" };
@@ -320,7 +379,16 @@ function drawProfileLines(ctx, canvas, scale, profileLevels) {
   const labelX = canvas.width - 6;
   ctx.textAlign = "right";
   ctx.font = "11px Segoe UI, Arial";
+
+  const bestByType = {};
   for (const level of profileLevels) {
+    const existing = bestByType[level.type];
+    if (!existing || level.strength > existing.strength) {
+      bestByType[level.type] = level;
+    }
+  }
+
+  for (const level of Object.values(bestByType)) {
     const y = scale.y(level.price);
     if (y < 10 || y > canvas.height - 10) continue;
     const color = lineColors[level.type] || "#aaa69b";
@@ -335,7 +403,10 @@ function drawProfileLines(ctx, canvas, scale, profileLevels) {
     ctx.stroke();
     ctx.restore();
     ctx.fillStyle = color;
-    ctx.fillText((lineLabels[level.type] || level.type) + " " + formatNumber(level.price), labelX, y - 4);
+    const rangeLabel = (level.lower_bound != null && level.upper_bound != null)
+      ? `${formatNumber(level.lower_bound)}-${formatNumber(level.upper_bound)}`
+      : formatNumber(level.price);
+    ctx.fillText((lineLabels[level.type] || level.type) + " " + rangeLabel, labelX, y - 4);
   }
 }
 
@@ -406,7 +477,7 @@ function drawDelta(canvas, series) {
 
 function drawVolumeProfileHistogram(ctx, canvas, scale, profileLevels, histWidth) {
   if (!profileLevels || !profileLevels.length) return;
-  const maxHvnLvn = 8;
+  const maxHvnLvn = 5;
   const seen = new Set();
   const deduped = [];
   const hvnLvnCount = { HVN: 0, LVN: 0 };
@@ -440,7 +511,11 @@ function drawVolumeProfileHistogram(ctx, canvas, scale, profileLevels, histWidth
     ctx.fillRect(barAreaLeft, barY, barWidth, barH);
     ctx.globalAlpha = 0.9;
     ctx.fillStyle = color;
-    ctx.fillText((level.type === "POC" ? "POC" : level.type === "HVN" ? "H" : level.type === "LVN" ? "L" : level.type) + " " + formatNumber(level.price), labelX, y + 3);
+    const histType = level.type === "POC" ? "POC" : level.type === "HVN" ? "H" : level.type === "LVN" ? "L" : level.type;
+    const histRangeLabel = (level.lower_bound != null && level.upper_bound != null)
+      ? `${formatNumber(level.lower_bound)}-${formatNumber(level.upper_bound)}`
+      : formatNumber(level.price);
+    ctx.fillText(histType + " " + histRangeLabel, labelX, y + 3);
   }
   ctx.globalAlpha = 1;
 
@@ -583,6 +658,13 @@ function formatAxisValue(value) {
 function formatNumber(value) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return "--";
   return Number(value).toLocaleString(undefined, { maximumFractionDigits: 2 });
+}
+
+function formatSignedPercent(value) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return "--";
+  const num = Number(value);
+  const sign = num > 0 ? "+" : "";
+  return sign + num.toFixed(2) + "%";
 }
 
 els.refresh.addEventListener("click", loadDashboard);

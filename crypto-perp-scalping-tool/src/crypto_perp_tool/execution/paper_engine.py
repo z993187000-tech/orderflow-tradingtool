@@ -108,6 +108,10 @@ class PaperTradingEngine:
             ny_start_minute=self.settings.profile.ny_start_minute,
             ny_end_hour=self.settings.profile.ny_end_hour,
         )
+        self._profile_engine = VolumeProfileEngine(
+            bin_size=self.bin_size, value_area_ratio=self.settings.profile.value_area_ratio,
+        )
+        self._last_profile_prune = 0
         self._load_journal_state()
 
     def process_trade(
@@ -126,6 +130,10 @@ class PaperTradingEngine:
         self._cumulative_delta += event.delta
         self._atr_1m.update(event)
         self._atr_3m.update(event)
+        self._profile_engine.add_trade(event.price, event.quantity, timestamp=event.timestamp)
+        if event.timestamp - self._last_profile_prune > 60_000:
+            self._profile_engine.prune(event.timestamp - self.rolling_window_ms)
+            self._last_profile_prune = event.timestamp
         self._record_aggression_bubble(event)
         self._rolling_delta.append(event.delta)
         self._refresh_indicators(event.timestamp)
@@ -171,7 +179,7 @@ class PaperTradingEngine:
                 "initial_equity": self.initial_equity,
                 "seen_trade_count": len(self._events),
                 "profile_trade_count": len(self._profile_events(self._last_event_time)),
-                "data_lag_ms": max(0, self._last_received_at - self._last_event_time),
+                "data_lag_ms": self._compute_data_lag(),
                 "delta_15s": self._last_delta_15s,
                 "delta_30s": self._last_delta_30s,
                 "delta_60s": self._last_delta_60s,
@@ -256,6 +264,10 @@ class PaperTradingEngine:
             return "unknown"
         return self._session_detector.detect(timestamp_ms).value
 
+    def _compute_data_lag(self) -> int:
+        lag_ms = max(0, self._last_received_at - self._last_event_time)
+        return -1 if lag_ms > 3_600_000 else lag_ms
+
     def _record_aggression_bubble(self, event: TradeEvent) -> None:
         bubble = self._bubble_detector.detect(event)
         if bubble is None:
@@ -274,10 +286,7 @@ class PaperTradingEngine:
         )
 
     def _profile_levels(self, timestamp: int):
-        profile = VolumeProfileEngine(bin_size=self.bin_size, value_area_ratio=self.settings.profile.value_area_ratio)
-        for event in self._profile_events(timestamp):
-            profile.add_trade(event.price, event.quantity)
-        return profile.levels("rolling_4h")
+        return self._profile_engine.levels("rolling_4h")
 
     def _profile_events(self, timestamp: int) -> list[TradeEvent]:
         if timestamp <= 0:

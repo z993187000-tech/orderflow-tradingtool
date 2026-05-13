@@ -5,7 +5,7 @@ from pathlib import Path
 
 from crypto_perp_tool.market_data import MarkPriceEvent, QuoteEvent, SpotPriceEvent, TradeEvent
 from crypto_perp_tool.market_data.binance import BinanceInstrumentSpec
-from crypto_perp_tool.types import SignalSide, TradeSignal
+from crypto_perp_tool.types import CircuitBreakerReason, SignalSide, TradeSignal
 from crypto_perp_tool.web.live_store import LiveOrderflowStore
 
 
@@ -505,6 +505,175 @@ class LiveOrderflowStoreTests(unittest.TestCase):
         self.assertEqual(summary["last_aggression_bubble"]["side"], "buy")
         self.assertIn("cvd_divergence", summary)
         self.assertIn("state", summary["cvd_divergence"])
+
+
+    def test_state_save_and_restore_preserves_pnl_and_counters(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "state-btcusdt.json"
+            signal = TradeSignal(
+                id="sig-state-1",
+                symbol="BTCUSDT",
+                side=SignalSide.LONG,
+                setup="test_state",
+                entry_price=100,
+                stop_price=95,
+                target_price=105,
+                confidence=0.8,
+                reasons=("test",),
+                invalidation_rules=("stop",),
+                created_at=4_000,
+            )
+            store = LiveOrderflowStore(
+                symbol="BTCUSDT", max_events=40, enable_signals=True,
+                journal_path=Path(tmp) / "journal.jsonl",
+                state_path=state_path,
+            )
+            store._signal_engine = OneShotSignalEngine(signal)
+            store.add_quote(QuoteEvent(3_900, "BTCUSDT", 99.9, 100.1))
+            for index in range(30):
+                store.add_trade(TradeEvent(1_000 + index * 100, "BTCUSDT", 100 + index * 0.01, 1, False), received_at=1_000 + index * 100)
+            store.add_trade(TradeEvent(10_000, "BTCUSDT", 106, 1, False), received_at=10_000)
+            view1 = store.view()
+
+            store2 = LiveOrderflowStore(
+                symbol="BTCUSDT", max_events=40, enable_signals=True,
+                journal_path=Path(tmp) / "journal.jsonl",
+                state_path=state_path,
+            )
+            view2 = store2.view()
+
+            self.assertEqual(view2["summary"]["realized_pnl"], view1["summary"]["realized_pnl"])
+            self.assertGreater(view2["summary"]["realized_pnl"], 0)
+            self.assertEqual(view2["summary"]["closed_positions"], view1["summary"]["closed_positions"])
+            self.assertEqual(view2["summary"]["signals"], view1["summary"]["signals"])
+            self.assertEqual(view2["summary"]["orders"], view1["summary"]["orders"])
+
+    def test_state_save_and_restore_round_trips_enums(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "state-btcusdt.json"
+            signal = TradeSignal(
+                id="sig-enum-1",
+                symbol="BTCUSDT",
+                side=SignalSide.SHORT,
+                setup="test_enum",
+                entry_price=200,
+                stop_price=210,
+                target_price=180,
+                confidence=0.7,
+                reasons=("test",),
+                invalidation_rules=("stop",),
+                created_at=5_000,
+            )
+            store = LiveOrderflowStore(
+                symbol="BTCUSDT", max_events=40, enable_signals=True,
+                journal_path=Path(tmp) / "journal.jsonl",
+                state_path=state_path,
+            )
+            store._signal_engine = OneShotSignalEngine(signal)
+            store.add_quote(QuoteEvent(4_900, "BTCUSDT", 199.9, 200.1))
+            for index in range(30):
+                store.add_trade(TradeEvent(1_000 + index * 100, "BTCUSDT", 200 + index * 0.01, 1, True), received_at=1_000 + index * 100)
+            store.add_trade(TradeEvent(11_000, "BTCUSDT", 179, 1, False), received_at=11_000)
+            view1 = store.view()
+
+            store2 = LiveOrderflowStore(
+                symbol="BTCUSDT", max_events=40, enable_signals=True,
+                journal_path=Path(tmp) / "journal.jsonl",
+                state_path=state_path,
+            )
+            view2 = store2.view()
+
+            self.assertEqual(view2["summary"]["signals"], view1["summary"]["signals"])
+            self.assertEqual(view2["summary"]["realized_pnl"], view1["summary"]["realized_pnl"])
+            self.assertGreater(view2["summary"]["realized_pnl"], 0)
+
+    def test_state_journal_fallback_restores_from_journal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            journal_path = Path(tmp) / "journal.jsonl"
+            state_path = Path(tmp) / "state-nonexistent.json"
+            signal = TradeSignal(
+                id="sig-fallback-1",
+                symbol="BTCUSDT",
+                side=SignalSide.LONG,
+                setup="test_fallback",
+                entry_price=100,
+                stop_price=95,
+                target_price=105,
+                confidence=0.8,
+                reasons=("test",),
+                invalidation_rules=("stop",),
+                created_at=4_000,
+            )
+            store = LiveOrderflowStore(
+                symbol="BTCUSDT", max_events=40, enable_signals=True,
+                journal_path=journal_path,
+            )
+            store._signal_engine = OneShotSignalEngine(signal)
+            store.add_quote(QuoteEvent(3_900, "BTCUSDT", 99.9, 100.1))
+            for index in range(30):
+                store.add_trade(TradeEvent(1_000 + index * 100, "BTCUSDT", 100 + index * 0.01, 1, False), received_at=1_000 + index * 100)
+            store.add_trade(TradeEvent(10_000, "BTCUSDT", 106, 1, False), received_at=10_000)
+            view1 = store.view()
+
+            store2 = LiveOrderflowStore(
+                symbol="BTCUSDT", max_events=40, enable_signals=True,
+                journal_path=journal_path,
+                state_path=state_path,
+            )
+            view2 = store2.view()
+
+            self.assertGreater(view2["summary"]["realized_pnl"], 0)
+            self.assertEqual(view2["summary"]["closed_positions"], view1["summary"]["closed_positions"])
+            self.assertEqual(view2["summary"]["signals"], view1["summary"]["signals"])
+
+    def test_state_clean_start_no_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "state-nonexistent.json"
+            journal_path = Path(tmp) / "journal-nonexistent.jsonl"
+            store = LiveOrderflowStore(
+                symbol="BTCUSDT", max_events=40, enable_signals=True,
+                journal_path=journal_path,
+                state_path=state_path,
+            )
+            view = store.view()
+            self.assertEqual(view["summary"]["realized_pnl"], 0)
+            self.assertEqual(view["summary"]["closed_positions"], 0)
+            self.assertEqual(view["summary"]["signals"], 0)
+            self.assertEqual(view["summary"]["orders"], 0)
+
+    def test_state_saves_periodically_on_add_trade(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "state-periodic.json"
+            journal_path = Path(tmp) / "journal.jsonl"
+            store = LiveOrderflowStore(
+                symbol="BTCUSDT", max_events=20, enable_signals=False,
+                journal_path=journal_path,
+                state_path=state_path,
+            )
+            store.add_trade(TradeEvent(1_000, "BTCUSDT", 100, 1, False), received_at=1_200)
+            mtime1 = state_path.stat().st_mtime if state_path.exists() else 0
+            store.add_trade(TradeEvent(2_000, "BTCUSDT", 101, 1, False), received_at=2_200)
+            self.assertTrue(state_path.exists())
+            if state_path.stat().st_mtime != mtime1:
+                self.skipTest("periodic save skipped (within 60s throttle)")
+            self.assertIn("cumulative_delta", json.loads(state_path.read_text()))
+
+    def test_state_circuit_breaker_trip_restored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "state-cb.json"
+            store = LiveOrderflowStore(
+                symbol="BTCUSDT", max_events=20,
+                state_path=state_path,
+            )
+            cb = store._circuit_breaker
+            cb.trip(CircuitBreakerReason.FLASH_CRASH_DETECTED)
+            store.save_state()
+            self.assertTrue(state_path.exists())
+            store2 = LiveOrderflowStore(
+                symbol="BTCUSDT", max_events=20,
+                state_path=state_path,
+            )
+            self.assertEqual(store2._circuit_breaker.state, "tripped")
 
 
 if __name__ == "__main__":

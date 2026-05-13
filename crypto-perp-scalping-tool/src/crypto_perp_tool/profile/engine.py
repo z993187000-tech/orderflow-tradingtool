@@ -23,6 +23,7 @@ class VolumeProfileEngine:
         self._trades: list[tuple[float, float, int]] = []
         self.session_high: float | None = None
         self.session_low: float | None = None
+        self._reference_ms: int | None = None
 
     def add_trade(self, price: float, quantity: float, timestamp: int = 0) -> None:
         if quantity <= 0:
@@ -30,10 +31,22 @@ class VolumeProfileEngine:
         if timestamp == 0:
             timestamp = int(time.time() * 1000)
         self._trades.append((price, quantity, timestamp))
+        self._reference_ms = max(self._reference_ms or 0, timestamp)
         if self.session_high is None or price > self.session_high:
             self.session_high = price
         if self.session_low is None or price < self.session_low:
             self.session_low = price
+
+    def prune(self, cutoff_ms: int) -> None:
+        """Remove trades older than cutoff_ms and recalculate extremes."""
+        self._trades = [(p, q, ts) for p, q, ts in self._trades if ts >= cutoff_ms]
+        if self._trades:
+            prices = [p for p, _, _ in self._trades]
+            self.session_high = max(prices)
+            self.session_low = min(prices)
+        else:
+            self.session_high = None
+            self.session_low = None
 
     def _evict_before(self, cutoff_ms: int) -> None:
         self._trades = [(p, q, ts) for p, q, ts in self._trades if ts >= cutoff_ms]
@@ -46,7 +59,8 @@ class VolumeProfileEngine:
             self.session_low = None
 
     def _window_cutoff(self, window: str) -> int:
-        now_ms = int(time.time() * 1000)
+        # Use reference timestamp when available (backtest mode), else wall clock
+        now_ms = self._reference_ms or int(time.time() * 1000)
         if window == "session":
             return _utc_midnight_ms()
         if window == "rolling_4h":

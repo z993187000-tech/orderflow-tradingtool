@@ -208,23 +208,128 @@ python -m crypto_perp_tool.cli simulation run
 - `symbol`：缺失时使用 `BTCUSDT`。
 - `is_buyer_maker`：Binance aggTrade 语义，`true` 记为主动卖出成交，`false` 记为主动买入成交。
 
-## Telegram Bot 初版边界
+## 运行回测
 
-当前代码提供 `TelegramCommandHandler`，用于验证命令边界和 service 调用。它还不是联网 long-polling bot。
+`BacktestEngine` 使用和实时模式相同的 `PaperTradingEngine` 执行核心，逐笔处理历史成交数据，经过 profile → signal → risk → execution 完整管线，输出回测报告、权益曲线和交易记录。
 
-已支持命令：
+```powershell
+$env:PYTHONPATH='src'
+python -m crypto_perp_tool.cli backtest run --csv data/sample_trades.csv --symbol BTCUSDT --equity 10000
+```
 
-- `/status`
-- `/pause`
-- `/resume`
-- `/risk`
-- `/journal`
+可选参数：
 
-所有命令都必须通过 chat id 白名单。未授权 chat id 会被拒绝并写入 journal。
+```powershell
+--entry-slippage 2.0    # 入场滑点 bps，默认 2
+--exit-slippage 3.0     # 出场滑点 bps，默认 3
+--fee 4.0               # Taker 手续费 bps，默认 4
+--start 1700000000000   # 起始时间戳(ms)过滤
+--end   1700100000000   # 结束时间戳(ms)过滤
+--split 0.6             # 样本内比例（启用 Walk-Forward 分割）
+```
 
-## 当前不包含
+### Walk-Forward 分割
 
-- 真实下单。
-- Telegram long polling。
+指定 `--split 0.6` 时，引擎按时间顺序将数据分为前 60% 样本内（in-sample）和后 40% 样本外（out-of-sample），分别运行并比较：
 
-这些属于下一阶段，在 paper replay、journal、risk、signal 和 Web 观察面板的核心契约稳定后再接入。
+```powershell
+python -m crypto_perp_tool.cli backtest run --csv data/historical.csv --split 0.6
+```
+
+输出包含 `in_sample`、`out_of_sample` 和 `walk_forward_efficiency`（OOS profit_factor / IS profit_factor），用于评估参数过拟合程度。
+
+### 输出字段
+
+- `symbol`：交易标的
+- `total_events`：处理的总成交事件数
+- `equity_start` / `equity_end`：起止权益
+- `total_return_pct`：总回报率
+- `report`：`BacktestReport`，包含 `total_trades`、`win_rate`、`profit_factor`、`average_r`、`max_drawdown`、`max_consecutive_losses`、`by_setup` 分组统计等
+- `trade_count`：完整交易记录数
+- `config_version`：策略参数哈希（用于区分不同参数组合的结果）
+- `data_quality`：数据精度（`aggTrade` 或 `aggTrade_no_quotes`）
+
+### CSV 格式
+
+必需列：`timestamp`、`price`、`quantity`
+可选列：`symbol`（缺失时使用 `--symbol` 参数的值）、`is_buyer_maker`
+
+## Telegram Bot
+
+Telegram Bot 用于远程查看交易状态、管理启停和接收告警。Bot 只作为操作入口和通知通道，不承载交易核心逻辑。
+
+### 环境变量配置
+
+启动前需要在环境变量中设置以下值：
+
+```powershell
+$env:TELEGRAM_BOT_TOKEN='1234567890:ABCDEFghijklmnopqrstuvwxyz'
+$env:TELEGRAM_ALLOWED_CHAT_IDS='123456789,987654321'
+```
+
+- `TELEGRAM_BOT_TOKEN`：从 [@BotFather](https://t.me/BotFather) 获取的 Bot Token。
+- `TELEGRAM_ALLOWED_CHAT_IDS`：允许使用 Bot 的 Telegram 用户或群组 chat id，逗号分隔。只有白名单内的 chat id 才能执行命令，其他请求会被拒绝并写入 journal。
+
+获取你的 chat id：在 Telegram 中搜索 `@userinfobot`，发送任意消息即可查看。
+
+### 启动 Bot 长轮询
+
+`TelegramPoller` 以 daemon 线程运行，在 Web Dashboard 启动时自动启动。如果在启动时环境变量中缺少 `TELEGRAM_BOT_TOKEN`，poller 会记录一条日志但不影响 Web 功能：
+
+```powershell
+$env:PYTHONPATH='src'
+$env:TELEGRAM_BOT_TOKEN='你的bot token'
+$env:TELEGRAM_ALLOWED_CHAT_IDS='你的chat id'
+python -m crypto_perp_tool.cli web serve --source binance --symbol BTCUSDT --port 8000
+```
+
+也可以在代码中手动启动：
+
+```python
+from crypto_perp_tool.telegram_bot import TelegramPoller, parse_allowed_chat_ids
+import os
+
+poller = TelegramPoller(
+    handler=handler,
+    token=os.environ["TELEGRAM_BOT_TOKEN"],
+    poll_interval=2.0,
+)
+poller.start()
+# 停止：poller.stop()
+```
+
+### 支持的命令
+
+| 命令 | 功能 | 示例输出 |
+|------|------|---------|
+| `/status` | 查看运行模式、交易所、交易标的和启停状态 | `mode=paper exchange=binance_futures symbols=BTCUSDT,ETHUSDT paused=false` |
+| `/positions` | 查看当前持仓详情 | `BTCUSDT long lvn_break_acceptance\nEntry: 96000.00  Stop: 95800.00  Target: 96500.00\nQty: 0.01  BE shifted: False  Absorb: False` |
+| `/pause` | 暂停新开仓信号（已有仓位的保护止损仍有效） | `new entries paused; protective exits remain active` |
+| `/resume` | 恢复新开仓信号 | `paper trading entries resumed` |
+| `/risk` | 查看风险参数配置 | `risk_per_trade=0.0025 daily_loss_limit=0.01 max_consecutive_losses=3 max_leverage=3 max_symbol_notional_equity_multiple=2.0` |
+| `/circuit` | 查看熔断状态 | `Circuit: normal` 或 `Circuit: tripped\nReason: daily_loss_limit_reached\nCooldown until: 1700000000000` |
+| `/journal` | 查看最近 3 条 journal 事件 | 最近事件的 JSON 字符串 |
+
+### 未连接交易引擎时的行为
+
+当 Bot 未关联 `LiveOrderflowStore` 时（例如仅通过 CLI 启动且未接入实时数据时），`/positions` 和 `/circuit` 返回：
+
+```text
+not connected to trading engine
+```
+
+`/status`、`/pause`、`/resume`、`/risk`、`/journal` 始终可用，因为它们直接访问 `TradingService`。
+
+### 安全要求
+
+- 必须配置 `TELEGRAM_ALLOWED_CHAT_IDS` 白名单。未授权 chat id 会被拒绝并写入 journal（事件类型：`telegram_command_rejected`）。
+- 所有成功命令写入 journal（事件类型：`telegram_command`），包含 chat id、命令和结果。
+- live mode 不能通过 Telegram 单独开启，必须同时满足 config `mode=live`、`LIVE_TRADING_CONFIRMATION` 环境变量和服务端二次确认。
+- Telegram token 只能放在服务器环境变量或密钥管理中，不允许写入 repo 或日志。journal 写入前会通过 `redact()` 脱敏。
+
+### 容错机制
+
+- `TelegramPoller` 在网络错误或 Telegram API 返回失败时自动重试。
+- 连续失败达到 10 次后 poller 自动停止，并写入 `telegram_poller_max_errors` journal 事件。
+- 轮询间隔默认 2 秒，错误后指数退避到最大 30 秒。
+- Telegram API HTTP 429（频率限制）时自动等待后重试。
