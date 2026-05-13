@@ -39,6 +39,13 @@ class WebStaticUiTests(unittest.TestCase):
 
         self.assertIn("setInterval(loadDashboard", js)
 
+    def test_recent_tape_filters_to_large_trades(self):
+        js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn("LARGE_TAPE_MIN_QTY", js)
+        self.assertIn("largeTapeTrades", js)
+        self.assertIn("trade.quantity >= LARGE_TAPE_MIN_QTY", js)
+
     def test_mobile_charts_have_bounded_css_height(self):
         css = (STATIC_DIR / "app.css").read_text(encoding="utf-8")
         js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
@@ -62,7 +69,7 @@ class WebStaticUiTests(unittest.TestCase):
         html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
         js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
 
-        for element_id in ["currentPosition", "signalReasons", "rejectReasons", "dataLag", "lastTradeTime"]:
+        for element_id in ["currentPosition", "signalReasons", "rejectReasons", "dataLag", "streamFreshness", "lastTradeTime"]:
             self.assertIn(f'id="{element_id}"', html)
             self.assertIn(element_id, js)
 
@@ -70,7 +77,18 @@ class WebStaticUiTests(unittest.TestCase):
         self.assertIn("signal_reasons", js)
         self.assertIn("reject_reasons", js)
         self.assertIn("data_lag_ms", js)
+        self.assertIn("exchange_lag_ms", js)
+        self.assertIn("stream_freshness_ms", js)
         self.assertIn("last_trade_time", js)
+
+    def test_dashboard_splits_exchange_lag_and_stream_freshness_labels(self):
+        html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+        js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn("Exchange Lag", html)
+        self.assertIn("Stream Freshness", html)
+        self.assertIn("exchange_lag_ms", js)
+        self.assertIn("stream_freshness_ms", js)
 
     def test_price_chart_draws_aggression_bubble_markers(self):
         js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
@@ -79,6 +97,14 @@ class WebStaticUiTests(unittest.TestCase):
         self.assertIn("drawAggressionBubble", js)
         self.assertIn("marker.quantity", js)
         self.assertIn("marker.side", js)
+
+    def test_price_chart_deduplicates_profile_level_labels(self):
+        js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn("latestProfileLevels", js)
+        self.assertIn("selectedProfileLevels", js)
+        self.assertIn("touched_at", js)
+        self.assertNotIn("maxHvnLvn", js)
 
     def test_dashboard_renders_strategy_explainability_panel(self):
         html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")

@@ -384,6 +384,12 @@ class LiveOrderflowStore:
             return 0
         return min(self._recent_lags)
 
+    def _stream_freshness_ms(self, last_received_at: int | None = None) -> int:
+        received_at = self._last_received_at if last_received_at is None else last_received_at
+        if not received_at:
+            return -1
+        return max(0, int(time.time() * 1000) - int(received_at))
+
     def _spread_bps(self, event: TradeEvent) -> float:
         return self._spread_bps_from_quote()
 
@@ -1062,6 +1068,7 @@ class LiveOrderflowStore:
             last_reject_reasons = list(self._last_reject_reasons)
             last_bubble = to_jsonable(deepcopy(self._last_bubble))
             klines = list(self._klines)
+            last_received_at = self._last_received_at
 
         cumulative_delta = 0.0
         trades: list[dict[str, Any]] = []
@@ -1114,6 +1121,9 @@ class LiveOrderflowStore:
         last_break_even_shift = last_action(paper_actions, "break_even_shift")
         last_absorption_reduce = last_action(paper_actions, "absorption_reduce")
         divergence_state = cvd_divergence_state(events, levels)
+        exchange_lag_ms = self._median_recent_lag()
+        exchange_lag_min_ms = self._min_recent_lag()
+        stream_freshness_ms = self._stream_freshness_ms(last_received_at)
 
         return {
             "summary": {
@@ -1152,8 +1162,12 @@ class LiveOrderflowStore:
                 "open_position": position,
                 "signal_reasons": last_signal_reasons,
                 "reject_reasons": last_reject_reasons,
-                "data_lag_ms": self._median_recent_lag(),
-                "lag_min_ms": self._min_recent_lag(),
+                "data_lag_ms": exchange_lag_ms,
+                "exchange_lag_ms": exchange_lag_ms,
+                "lag_min_ms": exchange_lag_min_ms,
+                "exchange_lag_min_ms": exchange_lag_min_ms,
+                "stream_freshness_ms": stream_freshness_ms,
+                "last_received_time": last_received_at or None,
                 "last_trade_time": self._last_event_time or None,
                 "last_aggression_bubble": last_bubble,
                 "last_break_even_shift": last_break_even_shift,

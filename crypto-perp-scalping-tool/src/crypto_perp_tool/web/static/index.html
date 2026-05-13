@@ -41,7 +41,8 @@
         <div class="metric-card" title="当前模拟持仓，含方向、数量、入场、止损和止盈"><span>Position / 当前持仓</span><strong id="currentPosition">flat</strong><small id="currentPositionMeta">无持仓</small></div>
         <div class="metric-card" title="最近一次信号触发原因"><span>Signal Reasons / 信号原因</span><strong id="signalReasons">--</strong></div>
         <div class="metric-card" title="最近一次拒绝信号或拒绝下单原因"><span>Reject Reasons / 拒绝原因</span><strong id="rejectReasons">--</strong></div>
-        <div class="metric-card" title="本地接收时间减交易所事件时间"><span>Data Lag / 数据延迟</span><strong id="dataLag">--</strong></div>
+        <div class="metric-card" title="本地接收时间减交易所事件时间；主要用于判断交易所事件到达本机的延迟"><span>Exchange Lag / 交易所延迟</span><strong id="dataLag">--</strong></div>
+        <div class="metric-card" title="当前时间减最近一次本地收到成交的时间；主要用于判断 WebSocket 是否还在推送"><span>Stream Freshness / 流新鲜度</span><strong id="streamFreshness">--</strong></div>
         <div class="metric-card" title="最近一笔 Binance aggTrade 事件时间"><span>Last Trade / 最近成交时间</span><strong id="lastTradeTime">--</strong></div>
         <div class="metric-card" title="行情 WebSocket 或回放数据源状态"><span>Connection / 连接状态</span><strong id="connection">--</strong></div>
       </section>

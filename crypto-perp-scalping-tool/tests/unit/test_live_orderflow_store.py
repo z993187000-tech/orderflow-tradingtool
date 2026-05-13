@@ -1,5 +1,6 @@
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -291,6 +292,17 @@ class LiveOrderflowStoreTests(unittest.TestCase):
         self.assertIsNotNone(engine.last_snapshot)
         self.assertGreaterEqual(summary["data_lag_ms"], 3_000)
         self.assertIn("data_stale", summary["reject_reasons"])
+
+    def test_live_store_splits_exchange_lag_from_stream_freshness(self):
+        store = LiveOrderflowStore(symbol="BTCUSDT", max_events=10)
+        now = int(time.time() * 1000)
+
+        store.add_trade(TradeEvent(now - 5_000, "BTCUSDT", 100, 1, False), received_at=now - 100)
+        summary = store.view()["summary"]
+
+        self.assertGreaterEqual(summary["exchange_lag_ms"], 4_800)
+        self.assertLess(summary["stream_freshness_ms"], 1_000)
+        self.assertEqual(summary["data_lag_ms"], summary["exchange_lag_ms"])
 
     def test_live_paper_journal_records_signal_fill_close_pnl_and_fee_fields(self):
         with tempfile.TemporaryDirectory() as tmp:

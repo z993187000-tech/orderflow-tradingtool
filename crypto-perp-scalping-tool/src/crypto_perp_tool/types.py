@@ -104,8 +104,6 @@ class MarketDataHealth:
         now = int(time.time() * 1000)
         if self.last_local_time > 0 and now - self.last_local_time > websocket_stale_ms:
             return True
-        if self.latency_ms > max_data_lag_ms:
-            return True
         return False
 
 
