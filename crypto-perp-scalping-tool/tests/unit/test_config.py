@@ -12,6 +12,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(settings.symbols, ("BTCUSDT", "ETHUSDT"))
         self.assertEqual(settings.risk.risk_per_trade, 0.0025)
         self.assertEqual(settings.risk.max_leverage, 3)
+        self.assertEqual(settings.profile.btc_bin_size, 5)
 
 
 if __name__ == "__main__":

@@ -54,7 +54,8 @@ const colors = {
 };
 
 const REFRESH_INTERVAL_MS = 2000;
-const LARGE_TAPE_MIN_QTY = 10;
+const LARGE_TAPE_MIN_QTY = 20;
+const PROFILE_OVERLAY_WIDTH = 96;
 const modeLabels = {
   paper: "Paper / 模拟",
   live: "Live / 实盘"
@@ -289,22 +290,24 @@ function recordRow(kind, record) {
 
 function drawPrice(canvas, trades, markers, profileLevels, klines) {
   const ctx = setupCanvas(canvas);
-  if (!trades.length) return;
+  const safeTrades = Array.isArray(trades) ? trades : [];
+  const safeKlines = Array.isArray(klines) ? klines : [];
+  const hasPriceData = safeTrades.length || (safeKlines && safeKlines.length);
+  if (!hasPriceData) return;
   const selectedProfileLevels = latestProfileLevels(profileLevels);
-  const histogramWidth = selectedProfileLevels.length ? 72 : 0;
-  const chartRight = canvas.width - histogramWidth;
+  const chartRight = canvas.width;
 
   const profilePrices = selectedProfileLevels.map(l => l.price).filter(p => Number.isFinite(Number(p)));
   let prices, timestamps, minTs, maxTs;
 
-  if (klines && klines.length) {
-    prices = klines.flatMap(k => [k.high, k.low]).concat(profilePrices);
-    timestamps = klines.map(k => k.timestamp);
+  if (safeKlines.length) {
+    prices = safeKlines.flatMap(k => [k.high, k.low]).concat(profilePrices);
+    timestamps = safeKlines.map(k => k.timestamp);
     minTs = timestamps[0];
     maxTs = timestamps[timestamps.length - 1];
   } else {
-    prices = trades.map(t => t.price).concat(profilePrices);
-    timestamps = trades.map(t => t.timestamp);
+    prices = safeTrades.map(t => t.price).concat(profilePrices);
+    timestamps = safeTrades.map(t => t.timestamp);
     minTs = timestamps[0];
     maxTs = timestamps[timestamps.length - 1];
   }
@@ -315,14 +318,15 @@ function drawPrice(canvas, trades, markers, profileLevels, klines) {
   drawYAxis(ctx, canvas, scale, prices);
   drawTimeAxis(ctx, canvas, scale, minTs, maxTs);
   drawProfileLines(ctx, canvas, scale, selectedProfileLevels);
+  drawVolumeProfileOverlay(ctx, canvas, scale, selectedProfileLevels);
 
-  if (klines && klines.length) {
-    drawKlines(ctx, klines, scale, chartRight);
+  if (safeKlines.length) {
+    drawKlines(ctx, safeKlines, scale, chartRight);
   } else {
     ctx.strokeStyle = colors.price;
     ctx.lineWidth = 2;
     ctx.beginPath();
-    trades.forEach((trade, index) => {
+    safeTrades.forEach((trade, index) => {
       const x = scale.x(trade.timestamp);
       const y = scale.y(trade.price);
       if (index === 0) ctx.moveTo(x, y);
@@ -332,7 +336,7 @@ function drawPrice(canvas, trades, markers, profileLevels, klines) {
   }
 
   const placedLabels = [];
-  markers.forEach(marker => {
+  (markers || []).forEach(marker => {
     const markerTs = marker.timestamp || 0;
     const x = scale.x(markerTs);
     const y = scale.y(Number(marker.price));
@@ -352,8 +356,6 @@ function drawPrice(canvas, trades, markers, profileLevels, klines) {
     placedLabels.push(labelY);
     ctx.fillText(marker.label || marker.type, Math.min(x + 8, chartRight - 90), labelY);
   });
-
-  if (histogramWidth > 0) drawVolumeProfileHistogram(ctx, canvas, scale, selectedProfileLevels, histogramWidth);
 }
 
 function drawKlines(ctx, klines, scale, chartRight) {
@@ -407,10 +409,6 @@ function profileLevelRank(level) {
 function drawProfileLines(ctx, canvas, scale, profileLevels) {
   if (!profileLevels || !profileLevels.length) return;
   const lineColors = { POC: "#e7b84b", HVN: "#36c98a", LVN: "#ef5b5b", VAH: "#4fb6d8", VAL: "#4fb6d8" };
-  const lineLabels = { POC: "POC", HVN: "HVN", LVN: "LVN", VAH: "VAH", VAL: "VAL" };
-  const labelX = canvas.width - 6;
-  ctx.textAlign = "right";
-  ctx.font = "11px Segoe UI, Arial";
 
   for (const level of profileLevels) {
     const y = scale.y(level.price);
@@ -426,11 +424,6 @@ function drawProfileLines(ctx, canvas, scale, profileLevels) {
     ctx.lineTo(canvas.width, y);
     ctx.stroke();
     ctx.restore();
-    ctx.fillStyle = color;
-    const rangeLabel = (level.lower_bound != null && level.upper_bound != null)
-      ? `${formatNumber(level.lower_bound)}-${formatNumber(level.upper_bound)}`
-      : formatNumber(level.price);
-    ctx.fillText((lineLabels[level.type] || level.type) + " " + rangeLabel, labelX, y - 4);
   }
 }
 
@@ -499,43 +492,49 @@ function drawDelta(canvas, series) {
   drawTimeAxis(ctx, canvas, scale, minTs, maxTs);
 }
 
-function drawVolumeProfileHistogram(ctx, canvas, scale, profileLevels, histWidth) {
+function drawVolumeProfileOverlay(ctx, canvas, scale, profileLevels) {
   if (!profileLevels || !profileLevels.length) return;
-  const maxStrength = Math.max(...profileLevels.map(l => l.strength), 1);
+  const maxStrength = Math.max(...profileLevels.map(l => Number(l.strength) || 0), 1);
   const colorFor = { POC: colors.warn, HVN: colors.buy, LVN: colors.sell, VAH: colors.price, VAL: colors.price };
-  const labelX = canvas.width - 4;
-  const barAreaLeft = canvas.width - histWidth + 4;
+  const barRight = canvas.width - 8;
+  const barAreaLeft = Math.max(54, canvas.width - PROFILE_OVERLAY_WIDTH);
+  const barAreaWidth = Math.max(8, barRight - barAreaLeft);
 
+  ctx.save();
   ctx.textAlign = "right";
+  ctx.textBaseline = "middle";
   ctx.font = "10px Segoe UI, Arial";
 
   for (const level of profileLevels) {
     const y = scale.y(level.price);
     if (y < 8 || y > canvas.height - 8) continue;
     const color = colorFor[level.type] || colors.price;
-    const barWidth = Math.max(4, Math.round((level.strength / maxStrength) * (histWidth - 16)));
-    const barY = y - 2;
-    const barH = Math.max(3, Math.min(6, (canvas.height - 56) / Math.max(profileLevels.length, 1)));
+    const barWidth = Math.max(6, Math.round(((Number(level.strength) || 0) / maxStrength) * barAreaWidth));
+    const lowerY = level.lower_bound != null ? scale.y(level.lower_bound) : y + 4;
+    const upperY = level.upper_bound != null ? scale.y(level.upper_bound) : y - 4;
+    const barY = Math.max(8, Math.min(lowerY, upperY));
+    const barH = Math.max(4, Math.min(canvas.height - 8 - barY, Math.abs(lowerY - upperY)));
 
     ctx.fillStyle = color;
-    ctx.globalAlpha = 0.35;
-    ctx.fillRect(barAreaLeft, barY, barWidth, barH);
+    ctx.globalAlpha = 0.24;
+    ctx.fillRect(barRight - barWidth, barY, barWidth, barH);
     ctx.globalAlpha = 0.9;
     ctx.fillStyle = color;
     const histType = level.type === "POC" ? "POC" : level.type === "HVN" ? "H" : level.type === "LVN" ? "L" : level.type;
     const histRangeLabel = (level.lower_bound != null && level.upper_bound != null)
       ? `${formatNumber(level.lower_bound)}-${formatNumber(level.upper_bound)}`
       : formatNumber(level.price);
-    ctx.fillText(histType + " " + histRangeLabel, labelX, y + 3);
+    ctx.fillText(histType + " " + histRangeLabel, barRight - 2, Math.max(12, Math.min(y + 3, canvas.height - 12)));
   }
-  ctx.globalAlpha = 1;
 
+  ctx.globalAlpha = 0.25;
   ctx.strokeStyle = "#3a3a3a";
   ctx.lineWidth = 1;
   ctx.beginPath();
-  ctx.moveTo(barAreaLeft - 2, 0);
-  ctx.lineTo(barAreaLeft - 2, canvas.height);
+  ctx.moveTo(barAreaLeft, 8);
+  ctx.lineTo(barAreaLeft, canvas.height - 8);
   ctx.stroke();
+  ctx.restore();
 }
 
 function renderTape(trades) {

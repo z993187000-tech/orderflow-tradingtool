@@ -106,6 +106,23 @@ class WebStaticUiTests(unittest.TestCase):
         self.assertIn("touched_at", js)
         self.assertNotIn("maxHvnLvn", js)
 
+    def test_price_chart_embeds_profile_overlay_on_price_axis(self):
+        js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn("PROFILE_OVERLAY_WIDTH", js)
+        self.assertIn("const chartRight = canvas.width", js)
+        self.assertIn("drawVolumeProfileOverlay", js)
+        self.assertIn("scale.y(level.price)", js)
+        self.assertIn("canvas.width - PROFILE_OVERLAY_WIDTH", js)
+        self.assertNotIn("canvas.width - histogramWidth", js)
+
+    def test_price_chart_draws_seeded_klines_without_trades(self):
+        js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn("hasPriceData", js)
+        self.assertIn("safeKlines.length", js)
+        self.assertNotIn("if (!trades.length) return;", js)
+
     def test_dashboard_renders_strategy_explainability_panel(self):
         html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
         js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")

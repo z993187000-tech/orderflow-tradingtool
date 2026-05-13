@@ -33,13 +33,29 @@ class PaperOpenPosition:
     setup: str
     quantity: float
     entry_price: float
+    signal_entry_price: float
     stop_price: float
     initial_stop_price: float
     target_price: float
     opened_at: int
     entry_fee: float = 0.0
+    initial_quantity: float = 0.0
     break_even_shifted: bool = False
     absorption_reduced: bool = False
+    first_take_profit_done: bool = False
+    trail_stop_price: float | None = None
+    max_favorable_move: float = 0.0
+    max_adverse_move: float = 0.0
+    entry_order_type: str = "limit"
+
+
+@dataclass
+class PaperPendingEntry:
+    signal: TradeSignal
+    quantity: float
+    limit_price: float
+    created_at: int
+    expires_at: int
 
 
 @dataclass(frozen=True)
@@ -48,6 +64,14 @@ class PaperExecutionConfig:
     exit_slippage_bps: float = 0.0
     partial_fill_ratio: float = 1.0
     stop_submission_success: bool = True
+    pending_entry_timeout_ms: int = 7_000
+    limit_entry_pullback_bps: float = 1.0
+    post_close_cooldown_ms: int = 30_000
+    first_take_profit_r: float = 1.0
+    first_take_profit_ratio: float = 0.5
+    trail_after_r: float = 1.0
+    trail_atr_multiple: float = 0.35
+    max_holding_ms: int = 180_000
 
 
 class PaperTradingEngine:
@@ -75,7 +99,9 @@ class PaperTradingEngine:
         self._events: list[TradeEvent] = []
         self._rolling_delta: list[float] = []
         self._position: PaperOpenPosition | None = None
+        self._pending_entry: PaperPendingEntry | None = None
         self._last_signal_at: int | None = None
+        self._last_close_at: int | None = None
         self._realized_pnl = 0.0
         self._consecutive_losses = 0
         self._details = self._empty_details()
@@ -137,10 +163,18 @@ class PaperTradingEngine:
         self._record_aggression_bubble(event)
         self._rolling_delta.append(event.delta)
         self._refresh_indicators(event.timestamp)
-        self._manage_position(event)
-        self._close_position_if_triggered(event)
+        filled_pending_entry = self._try_fill_pending_entry(event)
+        if not filled_pending_entry:
+            skip_close = self._manage_position(event)
+            if not skip_close:
+                self._close_position_if_triggered(event)
 
-        if self._position is not None or self._signal_is_in_cooldown(event.timestamp):
+        if (
+            self._position is not None
+            or self._pending_entry is not None
+            or self._signal_is_in_cooldown(event.timestamp)
+            or self._post_close_is_in_cooldown(event.timestamp)
+        ):
             self._refresh_pnl_ranges()
             return
 
@@ -157,7 +191,7 @@ class PaperTradingEngine:
             self._refresh_pnl_ranges()
             return
 
-        self._open_position(signal, decision.quantity)
+        self._queue_entry(signal, decision.quantity)
         self._refresh_pnl_ranges()
 
     def summary(self) -> dict[str, Any]:
@@ -298,6 +332,11 @@ class PaperTradingEngine:
             return False
         return timestamp - self._last_signal_at < self.signal_cooldown_ms
 
+    def _post_close_is_in_cooldown(self, timestamp: int) -> bool:
+        if self._last_close_at is None:
+            return False
+        return timestamp - self._last_close_at < self.execution_config.post_close_cooldown_ms
+
     def _account_state(self) -> AccountState:
         return AccountState(
             equity=self.initial_equity + self._realized_pnl,
@@ -331,14 +370,74 @@ class PaperTradingEngine:
         )
         self._write_journal("signal", {"signal": signal})
 
-    def _open_position(self, signal: TradeSignal, quantity: float) -> None:
+    def _queue_entry(self, signal: TradeSignal, quantity: float) -> None:
+        limit_price = self._entry_limit_price(signal)
+        self._pending_entry = PaperPendingEntry(
+            signal=signal,
+            quantity=quantity,
+            limit_price=limit_price,
+            created_at=signal.created_at,
+            expires_at=signal.created_at + self.execution_config.pending_entry_timeout_ms,
+        )
+        self._write_journal(
+            "paper_entry_order",
+            {
+                "signal_id": signal.id,
+                "symbol": signal.symbol,
+                "side": signal.side.value,
+                "entry_order_type": "limit",
+                "limit_price": limit_price,
+                "status": "pending",
+                "expires_at": self._pending_entry.expires_at,
+            },
+        )
+
+    def _try_fill_pending_entry(self, event: TradeEvent) -> bool:
+        if self._pending_entry is None:
+            return False
+
+        pending = self._pending_entry
+        if event.timestamp > pending.expires_at:
+            self._record_risk_event(
+                "entry_timeout",
+                event.timestamp,
+                {"signal_id": pending.signal.id, "limit_price": pending.limit_price},
+            )
+            self._write_journal(
+                "paper_order_cancelled",
+                {
+                    "signal_id": pending.signal.id,
+                    "symbol": pending.signal.symbol,
+                    "side": pending.signal.side.value,
+                    "entry_order_type": "limit",
+                    "limit_price": pending.limit_price,
+                    "status": "cancelled",
+                },
+            )
+            self._pending_entry = None
+            return False
+
+        if not self._pending_entry_touched(pending, event.price):
+            return False
+
+        self._pending_entry = None
+        self._fill_entry(pending, event)
+        return True
+
+    def _pending_entry_touched(self, pending: PaperPendingEntry, price: float) -> bool:
+        if pending.signal.side == SignalSide.LONG:
+            return price <= pending.limit_price
+        return price >= pending.limit_price
+
+    def _fill_entry(self, pending: PaperPendingEntry, event: TradeEvent) -> None:
+        signal = pending.signal
         fill_ratio = min(max(self.execution_config.partial_fill_ratio, 0.0), 1.0)
-        filled_quantity = quantity * fill_ratio
+        filled_quantity = pending.quantity * fill_ratio
         if filled_quantity <= 0:
             self._record_risk_event("quantity_below_partial_fill", signal.created_at)
             return
 
-        fill_price = self._entry_fill_price(signal)
+        fill_price = self._entry_limit_fill_price(signal, pending.limit_price, event.price)
         entry_fee = abs(fill_price * filled_quantity) * self.taker_fee_rate
         order_status = "filled" if fill_ratio >= 1.0 else "partially_filled"
         self._position = PaperOpenPosition(
@@ -348,27 +447,31 @@ class PaperTradingEngine:
             setup=signal.setup,
             quantity=filled_quantity,
             entry_price=fill_price,
+            signal_entry_price=signal.entry_price,
             stop_price=signal.stop_price,
             initial_stop_price=signal.stop_price,
             target_price=signal.target_price,
-            opened_at=signal.created_at,
+            opened_at=event.timestamp,
             entry_fee=entry_fee,
+            initial_quantity=filled_quantity,
         )
         self._details["paper"]["orders"].append(
             {
-                "timestamp": signal.created_at,
+                "timestamp": event.timestamp,
                 "symbol": signal.symbol,
                 "side": signal.side.value,
                 "setup": signal.setup,
                 "quantity": filled_quantity,
-                "requested_quantity": quantity,
+                "requested_quantity": pending.quantity,
                 "entry_price": fill_price,
                 "signal_entry_price": signal.entry_price,
+                "entry_order_type": "limit",
+                "limit_price": pending.limit_price,
                 "stop_price": signal.stop_price,
                 "target_price": signal.target_price,
                 "status": order_status,
                 "fill_ratio": fill_ratio,
-                "slippage_bps": self.execution_config.entry_slippage_bps,
+                "slippage_bps": 0.0,
                 "entry_fee": entry_fee,
             }
         )
@@ -383,7 +486,9 @@ class PaperTradingEngine:
                 "quantity": filled_quantity,
                 "fill_price": fill_price,
                 "fill_ratio": fill_ratio,
-                "slippage_bps": self.execution_config.entry_slippage_bps,
+                "entry_order_type": "limit",
+                "limit_price": pending.limit_price,
+                "slippage_bps": 0.0,
                 "entry_fee": entry_fee,
             },
         )
@@ -396,6 +501,9 @@ class PaperTradingEngine:
                 "setup": signal.setup,
                 "quantity": filled_quantity,
                 "entry_price": fill_price,
+                "signal_entry_price": signal.entry_price,
+                "entry_order_type": "limit",
+                "limit_price": pending.limit_price,
                 "stop_price": signal.stop_price,
                 "target_price": signal.target_price,
                 "status": order_status,
@@ -405,11 +513,104 @@ class PaperTradingEngine:
         if not self.execution_config.stop_submission_success:
             self._handle_stop_submission_failure(signal.created_at)
 
-    def _manage_position(self, event: TradeEvent) -> None:
+    def _manage_position(self, event: TradeEvent) -> bool:
+        if self._position is None:
+            return False
+        self._update_max_moves(event.price)
+        if self._take_partial_profit(event):
+            self._update_trailing_stop(event)
+            return True
+        self._shift_stop_to_break_even(event)
+        self._update_trailing_stop(event)
+        self._reduce_for_absorption(event)
+        return self._close_for_orderflow_invalidation(event)
+
+    def _update_max_moves(self, price: float) -> None:
         if self._position is None:
             return
-        self._shift_stop_to_break_even(event)
-        self._reduce_for_absorption(event)
+        position = self._position
+        favorable = price - position.entry_price if position.side == SignalSide.LONG else position.entry_price - price
+        adverse = position.entry_price - price if position.side == SignalSide.LONG else price - position.entry_price
+        position.max_favorable_move = max(position.max_favorable_move, favorable)
+        position.max_adverse_move = max(position.max_adverse_move, adverse)
+
+    def _take_partial_profit(self, event: TradeEvent) -> bool:
+        if self._position is None or self._position.first_take_profit_done:
+            return False
+        position = self._position
+        risk = abs(position.entry_price - position.initial_stop_price)
+        if risk <= 0:
+            return False
+        favorable_move = event.price - position.entry_price if position.side == SignalSide.LONG else position.entry_price - event.price
+        if favorable_move < risk * self.execution_config.first_take_profit_r:
+            return False
+        reduce_quantity = position.quantity * self.execution_config.first_take_profit_ratio
+        if reduce_quantity <= 0 or reduce_quantity >= position.quantity:
+            return False
+        trigger_price = (
+            position.entry_price + risk * self.execution_config.first_take_profit_r
+            if position.side == SignalSide.LONG
+            else position.entry_price - risk * self.execution_config.first_take_profit_r
+        )
+        self._reduce_position(event.timestamp, trigger_price, reduce_quantity, "partial_take_profit")
+        if self._position is not None:
+            self._position.stop_price = self._position.entry_price
+            self._position.break_even_shifted = True
+            self._position.first_take_profit_done = True
+            self._record_protective_action(
+                "break_even_shift",
+                event.timestamp,
+                {"signal_id": self._position.signal_id, "stop_price": self._position.stop_price, "trigger_price": event.price},
+            )
+        return True
+
+    def _update_trailing_stop(self, event: TradeEvent) -> None:
+        if self._position is None:
+            return
+        position = self._position
+        risk = abs(position.entry_price - position.initial_stop_price)
+        if risk <= 0:
+            return
+        favorable_move = event.price - position.entry_price if position.side == SignalSide.LONG else position.entry_price - event.price
+        if favorable_move < risk * self.execution_config.trail_after_r:
+            return
+        atr_buffer = self._current_atr(event.price) * self.execution_config.trail_atr_multiple
+        if position.side == SignalSide.LONG:
+            trail_stop = event.price - atr_buffer
+            if trail_stop > position.stop_price:
+                position.stop_price = trail_stop
+                position.trail_stop_price = trail_stop
+                self._record_protective_action(
+                    "trail_stop_update",
+                    event.timestamp,
+                    {"signal_id": position.signal_id, "stop_price": trail_stop, "trigger_price": event.price},
+                )
+        else:
+            trail_stop = event.price + atr_buffer
+            if trail_stop < position.stop_price:
+                position.stop_price = trail_stop
+                position.trail_stop_price = trail_stop
+                self._record_protective_action(
+                    "trail_stop_update",
+                    event.timestamp,
+                    {"signal_id": position.signal_id, "stop_price": trail_stop, "trigger_price": event.price},
+                )
+
+    def _close_for_orderflow_invalidation(self, event: TradeEvent) -> bool:
+        if self._position is None:
+            return False
+        position = self._position
+        risk = abs(position.entry_price - position.initial_stop_price)
+        if risk <= 0:
+            return False
+        opposite_delta = -self._last_delta_30s if position.side == SignalSide.LONG else self._last_delta_30s
+        mean_abs_delta = abs(sum(self._rolling_delta[-30:]) / max(len(self._rolling_delta[-30:]), 1)) if self._rolling_delta else 0
+        baseline = max(mean_abs_delta * 2.0, 10.0)
+        favorable_move = event.price - position.entry_price if position.side == SignalSide.LONG else position.entry_price - event.price
+        if opposite_delta < baseline or favorable_move > risk * 0.25:
+            return False
+        self._close_position(event.timestamp, event.price, "orderflow_invalidation")
+        return True
 
     def _shift_stop_to_break_even(self, event: TradeEvent) -> None:
         if self._position is None or self._position.break_even_shifted:
@@ -480,13 +681,19 @@ class PaperTradingEngine:
         if self._position is None:
             return
 
-        close_price = self._triggered_close_price(self._position, event.price)
+        close_price, exit_reason = self._triggered_close(self._position, event.price, event.timestamp)
         if close_price is None:
             return
 
+        self._close_position(event.timestamp, close_price, exit_reason or "target")
+
+    def _close_position(self, timestamp: int, trigger_price: float, exit_reason: str) -> None:
+        if self._position is None:
+            return
         position = self._position
         self._position = None
-        fill_price = self._exit_fill_price(position, close_price)
+        self._last_close_at = timestamp
+        fill_price = self._exit_fill_price(position, trigger_price)
         gross_pnl = self._position_pnl(position, fill_price)
         exit_fee = abs(fill_price * position.quantity) * self.taker_fee_rate
         net_pnl = gross_pnl - position.entry_fee - exit_fee
@@ -496,15 +703,18 @@ class PaperTradingEngine:
         pnl_percent = (net_pnl / entry_notional * 100) if entry_notional else 0.0
         closed = {
             "signal_id": position.signal_id,
-            "timestamp": event.timestamp,
+            "timestamp": timestamp,
             "symbol": position.symbol,
             "side": position.side.value,
             "setup": position.setup,
             "quantity": position.quantity,
             "entry_price": position.entry_price,
+            "signal_entry_price": position.signal_entry_price,
             "close_price": fill_price,
             "stop_price": position.stop_price,
+            "initial_stop_price": position.initial_stop_price,
             "target_price": position.target_price,
+            "entry_order_type": position.entry_order_type,
             "entry_fee": position.entry_fee,
             "exit_fee": exit_fee,
             "gross_pnl": gross_pnl,
@@ -512,12 +722,19 @@ class PaperTradingEngine:
             "pnl_percent": pnl_percent,
             "realized_pnl": net_pnl,
             "opened_at": position.opened_at,
+            "exit_reason": exit_reason,
+            "break_even_shifted": position.break_even_shifted,
+            "absorption_reduced": position.absorption_reduced,
+            "first_take_profit_done": position.first_take_profit_done,
+            "trail_stop_price": position.trail_stop_price,
+            "max_favorable_move": position.max_favorable_move,
+            "max_adverse_move": position.max_adverse_move,
             "slippage_bps": self.execution_config.exit_slippage_bps,
         }
         self._details["paper"]["closed_positions"].append(closed)
         self._details["paper"]["pnl_events"].append(
             {
-                "timestamp": event.timestamp,
+                "timestamp": timestamp,
                 "symbol": position.symbol,
                 "side": position.side.value,
                 "realized_pnl": net_pnl,
@@ -527,13 +744,81 @@ class PaperTradingEngine:
         self._markers.append(
             {
                 "type": "position_closed",
-                "timestamp": event.timestamp,
+                "timestamp": timestamp,
                 "price": fill_price,
                 "label": f"PnL {net_pnl:.2f} ({pnl_percent:+.2f}%)",
                 "side": position.side.value,
             }
         )
         self._write_journal("position_closed", closed)
+
+    def _reduce_position(self, timestamp: int, trigger_price: float, quantity: float, exit_reason: str) -> None:
+        if self._position is None:
+            return
+        position = self._position
+        original_quantity = position.quantity
+        if quantity <= 0 or quantity >= original_quantity:
+            return
+        close_fill_price = self._exit_fill_price(position, trigger_price)
+        if position.side == SignalSide.LONG:
+            gross_pnl = (close_fill_price - position.entry_price) * quantity
+        else:
+            gross_pnl = (position.entry_price - close_fill_price) * quantity
+        entry_fee_portion = position.entry_fee * (quantity / original_quantity)
+        exit_fee = abs(close_fill_price * quantity) * self.taker_fee_rate
+        net_pnl = gross_pnl - entry_fee_portion - exit_fee
+        position.quantity = original_quantity - quantity
+        position.entry_fee -= entry_fee_portion
+        self._realized_pnl += net_pnl
+        entry_notional = position.entry_price * quantity
+        pnl_percent = (net_pnl / entry_notional * 100) if entry_notional else 0.0
+        reduced = {
+            "signal_id": position.signal_id,
+            "timestamp": timestamp,
+            "symbol": position.symbol,
+            "side": position.side.value,
+            "setup": position.setup,
+            "quantity": quantity,
+            "remaining_quantity": position.quantity,
+            "entry_price": position.entry_price,
+            "signal_entry_price": position.signal_entry_price,
+            "close_price": close_fill_price,
+            "stop_price": position.stop_price,
+            "initial_stop_price": position.initial_stop_price,
+            "target_price": position.target_price,
+            "entry_order_type": position.entry_order_type,
+            "entry_fee": entry_fee_portion,
+            "exit_fee": exit_fee,
+            "gross_pnl": gross_pnl,
+            "net_pnl": net_pnl,
+            "pnl_percent": pnl_percent,
+            "realized_pnl": net_pnl,
+            "opened_at": position.opened_at,
+            "exit_reason": exit_reason,
+            "break_even_shifted": position.break_even_shifted,
+            "absorption_reduced": position.absorption_reduced,
+            "first_take_profit_done": position.first_take_profit_done,
+            "trail_stop_price": position.trail_stop_price,
+            "max_favorable_move": position.max_favorable_move,
+            "max_adverse_move": position.max_adverse_move,
+            "slippage_bps": self.execution_config.exit_slippage_bps,
+        }
+        self._details["paper"]["closed_positions"].append(reduced)
+        self._details["paper"]["pnl_events"].append(
+            {
+                "timestamp": timestamp,
+                "symbol": position.symbol,
+                "side": position.side.value,
+                "realized_pnl": net_pnl,
+                "pnl_percent": pnl_percent,
+            }
+        )
+        self._record_protective_action(
+            exit_reason,
+            timestamp,
+            {"signal_id": position.signal_id, "quantity": quantity, "remaining_quantity": position.quantity},
+        )
+        self._write_journal("position_reduced", reduced)
 
     def _handle_stop_submission_failure(self, timestamp: int) -> None:
         if self._position is None:
@@ -584,23 +869,38 @@ class PaperTradingEngine:
         self._write_journal("position_closed", closed)
         self._write_journal("protective_close", closed)
 
-    def _triggered_close_price(self, position: PaperOpenPosition, price: float) -> float | None:
+    def _triggered_close(self, position: PaperOpenPosition, price: float, timestamp: int) -> tuple[float | None, str | None]:
         if position.side == SignalSide.LONG:
             if price <= position.stop_price:
-                return position.stop_price
+                reason = "trailing_stop" if position.trail_stop_price is not None else "stop_loss"
+                return position.stop_price, reason
             if price >= position.target_price:
-                return position.target_price
+                return position.target_price, "target"
         if position.side == SignalSide.SHORT:
             if price >= position.stop_price:
-                return position.stop_price
+                reason = "trailing_stop" if position.trail_stop_price is not None else "stop_loss"
+                return position.stop_price, reason
             if price <= position.target_price:
-                return position.target_price
-        return None
+                return position.target_price, "target"
+        if timestamp - position.opened_at >= self.execution_config.max_holding_ms:
+            return price, "time_stop"
+        return None, None
 
     def _position_pnl(self, position: PaperOpenPosition, close_price: float) -> float:
         if position.side == SignalSide.LONG:
             return (close_price - position.entry_price) * position.quantity
         return (position.entry_price - close_price) * position.quantity
+
+    def _entry_limit_price(self, signal: TradeSignal) -> float:
+        adjustment = self.execution_config.limit_entry_pullback_bps / 10_000
+        if signal.side == SignalSide.LONG:
+            return signal.entry_price * (1 - adjustment)
+        return signal.entry_price * (1 + adjustment)
+
+    def _entry_limit_fill_price(self, signal: TradeSignal, limit_price: float, event_price: float) -> float:
+        if signal.side == SignalSide.LONG:
+            return min(limit_price, event_price)
+        return max(limit_price, event_price)
 
     def _entry_fill_price(self, signal: TradeSignal) -> float:
         adjustment = self.execution_config.entry_slippage_bps / 10_000
@@ -722,6 +1022,8 @@ class PaperTradingEngine:
         stop_price = float(order.get("stop_price") or 0)
         target_price = float(order.get("target_price") or 0)
         signal_id = str(order.get("signal_id") or "")
+        status = str(order.get("status") or "filled")
+        signal_entry_price = float(order.get("signal_entry_price") or entry_price)
         self._last_event_time = max(self._last_event_time, timestamp)
         self._details["paper"]["orders"].append(
             {
@@ -732,14 +1034,19 @@ class PaperTradingEngine:
                 "quantity": quantity,
                 "requested_quantity": float(order.get("requested_quantity") or quantity),
                 "entry_price": entry_price,
+                "signal_entry_price": signal_entry_price,
+                "entry_order_type": str(order.get("entry_order_type") or "market"),
+                "limit_price": float(order.get("limit_price") or entry_price),
                 "stop_price": stop_price,
                 "target_price": target_price,
-                "status": str(order.get("status") or "filled"),
+                "status": status,
                 "fill_ratio": float(order.get("fill_ratio") or 1),
                 "slippage_bps": float(order.get("slippage_bps") or 0),
                 "entry_fee": float(order.get("entry_fee") or 0),
             }
         )
+        if status not in {"filled", "partially_filled"}:
+            return
         self._position = PaperOpenPosition(
             signal_id=signal_id,
             symbol=symbol,
@@ -747,11 +1054,14 @@ class PaperTradingEngine:
             setup=str(order.get("setup") or ""),
             quantity=quantity,
             entry_price=entry_price,
+            signal_entry_price=signal_entry_price,
             stop_price=stop_price,
             initial_stop_price=stop_price,
             target_price=target_price,
             opened_at=timestamp,
             entry_fee=float(order.get("entry_fee") or 0),
+            initial_quantity=float(order.get("requested_quantity") or quantity),
+            entry_order_type=str(order.get("entry_order_type") or "market"),
         )
 
     def _restore_closed_position(self, closed: dict[str, Any], journal_time: int) -> None:
@@ -771,13 +1081,14 @@ class PaperTradingEngine:
             "close_price": float(closed.get("close_price") or 0),
             "stop_price": float(closed.get("stop_price") or 0),
             "target_price": float(closed.get("target_price") or 0),
+            "opened_at": int(closed.get("opened_at") or timestamp),
+            "exit_reason": str(closed.get("exit_reason") or "unknown"),
             "entry_fee": float(closed.get("entry_fee") or 0),
             "exit_fee": float(closed.get("exit_fee") or 0),
             "gross_pnl": float(closed.get("gross_pnl") or realized_pnl),
             "net_pnl": realized_pnl,
             "pnl_percent": float(closed.get("pnl_percent") or 0),
             "realized_pnl": realized_pnl,
-            "opened_at": int(closed.get("opened_at") or timestamp),
         }
         self._last_event_time = max(self._last_event_time, timestamp)
         self._realized_pnl += realized_pnl

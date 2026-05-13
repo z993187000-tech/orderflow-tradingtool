@@ -36,8 +36,20 @@ class VolumeProfileEngineTests(unittest.TestCase):
         val = next(level for level in levels if level.type == ProfileLevelType.VAL)
         vah = next(level for level in levels if level.type == ProfileLevelType.VAH)
         self.assertEqual(poc.price, 100)
-        self.assertEqual(val.price, 95)
-        self.assertEqual(vah.price, 105)
+        self.assertEqual(val.price, 100)
+        self.assertEqual(vah.price, 110)
+
+    def test_five_dollar_bins_use_floor_bucket_ranges(self):
+        engine = VolumeProfileEngine(bin_size=5, value_area_ratio=0.70)
+        for price, volume in [(64998.2, 1), (65000.1, 2), (65004.9, 3), (65005.0, 1)]:
+            engine.add_trade(price=price, quantity=volume, timestamp=self.now)
+
+        levels = engine.levels(window="rolling_4h")
+        poc = next(level for level in levels if level.type == ProfileLevelType.POC)
+
+        self.assertEqual(poc.price, 65000)
+        self.assertEqual(poc.lower_bound, 65000)
+        self.assertEqual(poc.upper_bound, 65005)
 
     def test_backward_compatible_add_trade_without_timestamp(self):
         engine = VolumeProfileEngine(bin_size=10, value_area_ratio=0.70)

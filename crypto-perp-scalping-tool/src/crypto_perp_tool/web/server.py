@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from crypto_perp_tool.journal import JsonlJournal
-from crypto_perp_tool.market_data.binance import BinanceAggTradeClient, fetch_instrument_spec
+from crypto_perp_tool.market_data.binance import BinanceAggTradeClient, BinanceHistoricalKlineClient, fetch_instrument_spec
 from crypto_perp_tool.service import TradingService
 from crypto_perp_tool.telegram_bot import TelegramCommandHandler, TelegramPoller, parse_allowed_chat_ids
 from crypto_perp_tool.web.auth import is_authorized, required_auth_header
@@ -18,6 +19,9 @@ from crypto_perp_tool.web.orderflow import build_orderflow_view
 
 
 STATIC_DIR = Path(__file__).with_name("static")
+KLINE_HISTORY_LIMIT = 96
+KLINE_INTERVAL = "5m"
+KLINE_LOOKBACK_MS = 8 * 60 * 60 * 1000
 
 
 def create_app_handler(
@@ -150,6 +154,25 @@ def create_app_handler(
     return DashboardHandler
 
 
+def seed_historical_klines(
+    store: LiveOrderflowStore,
+    client: BinanceHistoricalKlineClient | None = None,
+    now_ms: int | None = None,
+) -> int:
+    client = client or BinanceHistoricalKlineClient()
+    now_ms = int(time.time() * 1000) if now_ms is None else int(now_ms)
+    start_ms = now_ms - KLINE_LOOKBACK_MS
+    klines = client.download(
+        store.symbol,
+        interval=KLINE_INTERVAL,
+        limit=KLINE_HISTORY_LIMIT,
+        start_time=start_ms,
+        end_time=now_ms,
+    )
+    store.seed_klines(klines)
+    return len(klines)
+
+
 def serve_dashboard(
     host: str,
     port: int,
@@ -187,6 +210,18 @@ def serve_dashboard(
                 state_path=symbol_state_path,
             )
             live_stores[live_symbol] = store
+            try:
+                seeded_count = seed_historical_klines(store)
+                if seeded_count:
+                    store.set_connection_status(
+                        "starting",
+                        f"seeded {seeded_count} historical 5m klines; waiting for Binance stream",
+                    )
+            except Exception as exc:
+                store.set_connection_status(
+                    "error",
+                    f"historical 5m kline seed failed: {exc}; waiting for Binance stream",
+                )
             client = BinanceAggTradeClient(
                 symbol=live_symbol,
                 on_trade=store.add_trade,

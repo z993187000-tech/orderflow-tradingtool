@@ -42,8 +42,8 @@ class OrderflowViewTests(unittest.TestCase):
         self.assertGreaterEqual(len(paper["signals"]), 1)
         self.assertGreaterEqual(len(paper["orders"]), 1)
         self.assertGreaterEqual(len(paper["closed_positions"]), 1)
-        self.assertGreater(paper["pnl_by_range"]["24h"], 0)
-        self.assertGreater(paper["pnl_by_range"]["all"], 0)
+        self.assertNotEqual(paper["pnl_by_range"]["24h"], 0)
+        self.assertEqual(paper["pnl_by_range"]["all"], paper["pnl_by_range"]["24h"])
         self.assertEqual(live["pnl_by_range"]["24h"], 0)
         self.assertEqual(view["summary"]["pnl_24h"], paper["pnl_by_range"]["24h"])
 

@@ -8,11 +8,12 @@ import os
 import threading
 import time
 import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from typing import Any, Callable
 from urllib.request import Request, urlopen
 
-from crypto_perp_tool.market_data.events import ForceOrderEvent, MarkPriceEvent, QuoteEvent, SpotPriceEvent, TradeEvent
+from crypto_perp_tool.market_data.events import ForceOrderEvent, KlineEvent, MarkPriceEvent, QuoteEvent, SpotPriceEvent, TradeEvent
 
 
 _INSTRUMENT_SPEC_CACHE: dict[str, "BinanceInstrumentSpec"] = {}
@@ -537,3 +538,84 @@ class BinanceHistoricalAggTradeClient:
             time.sleep(0.15)
 
         return trades
+
+
+class BinanceHistoricalKlineClient:
+    """Downloads historical Futures klines from the public REST endpoint."""
+
+    BASE_URL = "https://fapi.binance.com"
+    MAX_LIMIT = 1500
+
+    def __init__(
+        self,
+        base_url: str | None = None,
+        timeout_seconds: float = 10.0,
+        loader: Callable[[str, float], list] | None = None,
+    ) -> None:
+        self.base_url = (base_url or self.BASE_URL).rstrip("/")
+        self.timeout_seconds = timeout_seconds
+        self.loader = loader or self._load_json
+
+    def _load_json(self, url: str, timeout: float) -> list:
+        proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
+        last_err = None
+        for attempt in range(3):
+            try:
+                if proxy:
+                    handler = urllib.request.ProxyHandler({"https": proxy, "http": proxy.replace("https", "http")})
+                    opener = urllib.request.build_opener(handler)
+                    req = Request(url, headers={"User-Agent": "crypto-perp-tool"})
+                    with opener.open(req, timeout=timeout) as response:
+                        return json.loads(response.read().decode("utf-8"))
+                req = Request(url, headers={"User-Agent": "crypto-perp-tool"})
+                with urlopen(req, timeout=timeout) as response:
+                    return json.loads(response.read().decode("utf-8"))
+            except Exception as exc:
+                last_err = exc
+                if attempt < 2:
+                    time.sleep(1.0 * (attempt + 1))
+        raise last_err  # type: ignore[misc]
+
+    def fetch(
+        self,
+        symbol: str,
+        interval: str = "5m",
+        limit: int = 96,
+        start_time: int | None = None,
+        end_time: int | None = None,
+    ) -> list:
+        params = [f"symbol={symbol.upper()}", f"interval={interval}", f"limit={min(limit, self.MAX_LIMIT)}"]
+        if start_time is not None:
+            params.append(f"startTime={start_time}")
+        if end_time is not None:
+            params.append(f"endTime={end_time}")
+        url = f"{self.base_url}/fapi/v1/klines?{'&'.join(params)}"
+        return self.loader(url, self.timeout_seconds)
+
+    def download(
+        self,
+        symbol: str,
+        interval: str = "5m",
+        limit: int = 96,
+        start_time: int | None = None,
+        end_time: int | None = None,
+    ) -> list[KlineEvent]:
+        sym = symbol.upper()
+        rows = self.fetch(sym, interval=interval, limit=limit, start_time=start_time, end_time=end_time)
+        return [self._parse_row(row, sym, interval) for row in rows]
+
+    def _parse_row(self, row: list, symbol: str, interval: str) -> KlineEvent:
+        return KlineEvent(
+            timestamp=int(row[0]),
+            close_time=int(row[6]),
+            symbol=symbol,
+            interval=interval,
+            open=float(row[1]),
+            high=float(row[2]),
+            low=float(row[3]),
+            close=float(row[4]),
+            volume=float(row[5]),
+            quote_volume=float(row[7]),
+            trade_count=int(row[8]),
+            is_closed=True,
+        )
