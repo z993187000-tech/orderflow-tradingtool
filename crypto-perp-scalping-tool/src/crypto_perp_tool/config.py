@@ -23,6 +23,14 @@ class ExecutionSettings:
     max_data_lag_ms: int = 2000
     btc_max_slippage_bps: int = 3
     eth_max_slippage_bps: int = 4
+    pending_entry_timeout_ms: int = 7_000
+    limit_entry_pullback_bps: float = 1.0
+    post_close_cooldown_ms: int = 30_000
+    first_take_profit_r: float = 1.0
+    first_take_profit_ratio: float = 0.5
+    trail_after_r: float = 1.0
+    trail_atr_multiple: float = 0.35
+    max_holding_ms: int = 180_000
 
 
 @dataclass(frozen=True)
@@ -30,7 +38,7 @@ class ProfileSettings:
     session_timezone: str = "UTC"
     value_area_ratio: float = 0.70
     rolling_window_minutes: int = 240
-    btc_bin_size: int = 10
+    btc_bin_size: int = 5
     eth_bin_size: int = 2
     asia_start_hour: int = 0
     asia_end_hour: int = 7
@@ -47,7 +55,7 @@ class SignalSettings:
     min_reward_risk: float = 1.2
     delta_window_seconds: tuple[int, ...] = (15, 30, 60)
     funding_blackout_minutes: int = 2
-    aggression_large_threshold: float = 10.0
+    aggression_large_threshold: float = 20.0
     aggression_block_threshold: float = 50.0
     atr_period: int = 14
     session_gating_enabled: bool = True

@@ -51,6 +51,8 @@ RANGE_MS = {
     "7d": 7 * 24 * 60 * 60 * 1000,
     "30d": 30 * 24 * 60 * 60 * 1000,
 }
+KLINE_HISTORY_LIMIT = 96
+KLINE_HISTORY_MS = 8 * 60 * 60 * 1000
 
 
 def _level_price(levels: tuple[ProfileLevel, ...], level_type: str) -> float:
@@ -109,13 +111,14 @@ class LiveOrderflowStore:
         self._realized_pnl = 0.0
         self._consecutive_losses = 0
         self._position: dict[str, Any] | None = None
+        self._pending_entry: dict[str, Any] | None = None
         self._historical: HistoricalWindows = HistoricalWindows()
         self._details = empty_execution_details()
         self._markers: list[dict[str, Any]] = []
         self._last_event_time = 0
         self._last_received_at = 0
         self._recent_lags: deque[int] = deque(maxlen=20)
-        self._klines: deque[KlineEvent] = deque(maxlen=500)
+        self._klines: deque[KlineEvent] = deque(maxlen=KLINE_HISTORY_LIMIT)
         self._last_delta_15s = 0.0
         self._last_delta_30s = 0.0
         self._last_delta_60s = 0.0
@@ -147,6 +150,7 @@ class LiveOrderflowStore:
         self._state_path = Path(state_path) if state_path is not None else None
         self._last_state_save_ms = 0
         self._last_signal_time = -1
+        self._last_close_time = -1
         self._signal_cooldown_ms = 30_000
         self._last_signal_reasons: tuple[str, ...] = ()
         self._last_reject_reasons: tuple[str, ...] = ()
@@ -168,8 +172,11 @@ class LiveOrderflowStore:
             self._atr_3m.update(event)
             self._record_aggression_bubble(event)
             self._refresh_indicators(event.timestamp)
-            self._manage_position(event)
-            self._try_close(event)
+            filled_pending_entry = self._try_fill_pending_entry(event)
+            if not filled_pending_entry:
+                skip_close = self._manage_position(event)
+                if not skip_close:
+                    self._try_close(event)
             self._update_historical(event)
             if not self.testing_mode and self._circuit_breaker.state != "tripped":
                 atr = self._current_atr(event.price)
@@ -218,7 +225,27 @@ class LiveOrderflowStore:
         if event.symbol.upper() != self.symbol:
             return
         with self._lock:
+            self._upsert_kline(event)
+
+    def seed_klines(self, events: list[KlineEvent] | tuple[KlineEvent, ...]) -> None:
+        with self._lock:
+            for event in events:
+                if event.symbol.upper() == self.symbol:
+                    self._upsert_kline(event)
+
+    def _upsert_kline(self, event: KlineEvent) -> None:
+        for index, existing in enumerate(self._klines):
+            if existing.interval == event.interval and existing.timestamp == event.timestamp:
+                self._klines[index] = event
+                break
+        else:
             self._klines.append(event)
+
+        ordered = sorted(self._klines, key=lambda kline: kline.timestamp)
+        if ordered:
+            cutoff = ordered[-1].timestamp - KLINE_HISTORY_MS
+            ordered = [kline for kline in ordered if kline.timestamp > cutoff]
+        self._klines = deque(ordered[-KLINE_HISTORY_LIMIT:], maxlen=KLINE_HISTORY_LIMIT)
 
     def set_connection_status(self, status: str, message: str) -> None:
         with self._lock:
@@ -300,9 +327,11 @@ class LiveOrderflowStore:
         if not self.testing_mode and self._circuit_breaker.state == "tripped":
             self._last_reject_reasons = ("circuit_breaker_tripped",)
             return
-        if self._position is not None or len(self._events) < 30:
+        if self._position is not None or self._pending_entry is not None or len(self._events) < 30:
             return
         if self._last_signal_time >= 0 and event.timestamp - self._last_signal_time < self._signal_cooldown_ms:
+            return
+        if self._last_close_time >= 0 and event.timestamp - self._last_close_time < self.settings.execution.post_close_cooldown_ms:
             return
 
         snapshot = self._snapshot(event, received_at)
@@ -421,7 +450,64 @@ class LiveOrderflowStore:
         self._write_journal("signal", {"signal": signal})
 
     def _open_position(self, signal: TradeSignal, quantity: float, slippage_bps: float) -> None:
-        fill = self._entry_fill(signal, quantity, slippage_bps)
+        limit_price = self._entry_limit_price(signal)
+        self._pending_entry = {
+            "signal": signal,
+            "quantity": quantity,
+            "limit_price": limit_price,
+            "created_at": signal.created_at,
+            "expires_at": signal.created_at + self.settings.execution.pending_entry_timeout_ms,
+            "slippage_bps": slippage_bps,
+        }
+        self._write_journal(
+            "paper_entry_order",
+            {
+                "signal_id": signal.id,
+                "symbol": signal.symbol,
+                "side": signal.side.value,
+                "entry_order_type": "limit",
+                "limit_price": limit_price,
+                "status": "pending",
+                "expires_at": self._pending_entry["expires_at"],
+            },
+        )
+
+    def _try_fill_pending_entry(self, event: TradeEvent) -> bool:
+        if self._pending_entry is None:
+            return False
+        pending = self._pending_entry
+        signal = pending["signal"]
+        if event.timestamp > int(pending["expires_at"]):
+            self._write_journal(
+                "paper_order_cancelled",
+                {
+                    "signal_id": signal.id,
+                    "symbol": signal.symbol,
+                    "side": signal.side.value,
+                    "entry_order_type": "limit",
+                    "limit_price": pending["limit_price"],
+                    "status": "cancelled",
+                },
+            )
+            self._last_reject_reasons = ("entry_timeout",)
+            self._record_risk_event("entry_timeout", event.timestamp, {"signal_id": signal.id, "limit_price": pending["limit_price"]})
+            self._pending_entry = None
+            return False
+        if not self._pending_entry_touched(pending, event.price):
+            return False
+        self._pending_entry = None
+        self._fill_pending_entry(pending, event)
+        return True
+
+    def _pending_entry_touched(self, pending: dict[str, Any], price: float) -> bool:
+        signal: TradeSignal = pending["signal"]
+        if signal.side == SignalSide.LONG:
+            return price <= float(pending["limit_price"])
+        return price >= float(pending["limit_price"])
+
+    def _fill_pending_entry(self, pending: dict[str, Any], event: TradeEvent) -> None:
+        signal: TradeSignal = pending["signal"]
+        fill = self._entry_limit_fill(signal, float(pending["quantity"]), float(pending["limit_price"]), event.price)
         if fill["quantity"] <= 0:
             self._rejected_count += 1
             self._last_reject_reasons = ("quantity_below_step_size",)
@@ -451,11 +537,15 @@ class LiveOrderflowStore:
             "initial_stop_price": signal.stop_price,
             "target_price": signal.target_price,
             "entry_fee": fill["fee"],
-            "opened_at": signal.created_at,
+            "opened_at": event.timestamp,
             "break_even_shifted": False,
             "absorption_reduced": False,
+            "first_take_profit_done": False,
+            "trail_stop_price": None,
             "max_favorable_move": 0.0,
             "max_adverse_move": 0.0,
+            "initial_quantity": fill["quantity"],
+            "entry_order_type": "limit",
             "entry_session": entry_session,
             "vwap_at_entry": self._last_vwap,
             "atr_at_entry": atr,
@@ -465,29 +555,45 @@ class LiveOrderflowStore:
             "val_at_entry": val,
         }
         order = {
-            "timestamp": signal.created_at,
+            "timestamp": event.timestamp,
             "symbol": signal.symbol,
             "side": signal.side.value,
             "quantity": fill["quantity"],
             "entry_price": fill["fill_price"],
             "signal_entry_price": signal.entry_price,
+            "entry_order_type": "limit",
+            "limit_price": pending["limit_price"],
             "stop_price": signal.stop_price,
             "target_price": signal.target_price,
             "status": "filled",
             "fee": fill["fee"],
-            "slippage_bps": fill["slippage_bps"],
+            "slippage_bps": 0.0,
         }
         self._order_count += 1
         self._details["paper"]["orders"].append(order)
-        self._write_journal("paper_fill", fill | {"signal_id": signal.id, "symbol": signal.symbol, "side": signal.side.value})
+        self._write_journal(
+            "paper_fill",
+            fill | {
+                "signal_id": signal.id,
+                "symbol": signal.symbol,
+                "side": signal.side.value,
+                "entry_order_type": "limit",
+                "limit_price": pending["limit_price"],
+            },
+        )
         self._write_journal("paper_order", order | {"signal_id": signal.id})
 
-    def _manage_position(self, event: TradeEvent) -> None:
+    def _manage_position(self, event: TradeEvent) -> bool:
         if self._position is None:
-            return
+            return False
         self._update_max_moves(event.price)
+        if self._take_partial_profit(event):
+            self._update_trailing_stop(event)
+            return True
         self._shift_stop_to_break_even(event)
+        self._update_trailing_stop(event)
         self._reduce_for_absorption(event)
+        return self._close_for_orderflow_invalidation(event)
 
     def _update_max_moves(self, price: float) -> None:
         if self._position is None:
@@ -561,31 +667,123 @@ class LiveOrderflowStore:
         )
         self._reduce_position(event, reduce_quantity, "absorption_reduce")
 
-    def _reduce_position(self, event: TradeEvent, quantity: float, reason: str) -> None:
+    def _take_partial_profit(self, event: TradeEvent) -> bool:
+        if self._position is None or self._position.get("first_take_profit_done"):
+            return False
+        position = self._position
+        entry = float(position["entry_price"])
+        initial_stop = float(position.get("initial_stop_price") or position["stop_price"])
+        risk = abs(entry - initial_stop)
+        if risk <= 0:
+            return False
+        side = position["side"]
+        favorable_move = event.price - entry if side == SignalSide.LONG else entry - event.price
+        if favorable_move < risk * self.settings.execution.first_take_profit_r:
+            return False
+        reduce_quantity = self._round_quantity(float(position["quantity"]) * self.settings.execution.first_take_profit_ratio)
+        if reduce_quantity <= 0 or reduce_quantity >= float(position["quantity"]):
+            return False
+        trigger_price = (
+            entry + risk * self.settings.execution.first_take_profit_r
+            if side == SignalSide.LONG
+            else entry - risk * self.settings.execution.first_take_profit_r
+        )
+        self._reduce_position(event, reduce_quantity, "partial_take_profit", trigger_price=trigger_price)
+        if self._position is not None:
+            self._position["stop_price"] = entry
+            self._position["break_even_shifted"] = True
+            self._position["first_take_profit_done"] = True
+            self._record_protective_action(
+                "break_even_shift",
+                event.timestamp,
+                {"signal_id": self._position["signal_id"], "stop_price": entry, "trigger_price": event.price},
+            )
+        return True
+
+    def _update_trailing_stop(self, event: TradeEvent) -> None:
+        if self._position is None:
+            return
+        position = self._position
+        entry = float(position["entry_price"])
+        initial_stop = float(position.get("initial_stop_price") or position["stop_price"])
+        risk = abs(entry - initial_stop)
+        if risk <= 0:
+            return
+        side = position["side"]
+        favorable_move = event.price - entry if side == SignalSide.LONG else entry - event.price
+        if favorable_move < risk * self.settings.execution.trail_after_r:
+            return
+        atr_buffer = self._current_atr(event.price) * self.settings.execution.trail_atr_multiple
+        if side == SignalSide.LONG:
+            trail_stop = self._round_price(event.price - atr_buffer, "down")
+            if trail_stop > float(position["stop_price"]):
+                position["stop_price"] = trail_stop
+                position["trail_stop_price"] = trail_stop
+                self._record_protective_action(
+                    "trail_stop_update",
+                    event.timestamp,
+                    {"signal_id": position["signal_id"], "stop_price": trail_stop, "trigger_price": event.price},
+                )
+        else:
+            trail_stop = self._round_price(event.price + atr_buffer, "up")
+            if trail_stop < float(position["stop_price"]):
+                position["stop_price"] = trail_stop
+                position["trail_stop_price"] = trail_stop
+                self._record_protective_action(
+                    "trail_stop_update",
+                    event.timestamp,
+                    {"signal_id": position["signal_id"], "stop_price": trail_stop, "trigger_price": event.price},
+                )
+
+    def _close_for_orderflow_invalidation(self, event: TradeEvent) -> bool:
+        if self._position is None:
+            return False
+        position = self._position
+        entry = float(position["entry_price"])
+        initial_stop = float(position.get("initial_stop_price") or position["stop_price"])
+        risk = abs(entry - initial_stop)
+        if risk <= 0:
+            return False
+        side = position["side"]
+        opposite_delta = -self._last_delta_30s if side == SignalSide.LONG else self._last_delta_30s
+        baseline = max(abs(self._historical.mean_delta_30s()) * 2.0, 10.0)
+        favorable_move = event.price - entry if side == SignalSide.LONG else entry - event.price
+        if opposite_delta < baseline or favorable_move > risk * 0.25:
+            return False
+        self._close_position(event, event.price, "orderflow_invalidation")
+        return True
+
+    def _reduce_position(self, event: TradeEvent, quantity: float, reason: str, trigger_price: float | None = None) -> None:
         if self._position is None:
             return
         position = self._position
         original_quantity = float(position["quantity"])
         close_position = dict(position)
         close_position["quantity"] = quantity
-        close_fill = self._exit_fill(close_position, event.price)
+        close_fill = self._exit_fill(close_position, event.price if trigger_price is None else trigger_price)
         gross_pnl = self._position_pnl(close_position, close_fill["fill_price"])
         entry_fee = float(position["entry_fee"]) * (quantity / original_quantity)
         net_pnl = gross_pnl - entry_fee - close_fill["fee"]
         position["quantity"] = self._round_quantity(original_quantity - quantity)
         position["entry_fee"] = float(position["entry_fee"]) - entry_fee
-        position["absorption_reduced"] = True
+        if reason == "absorption_reduce":
+            position["absorption_reduced"] = True
         self._realized_pnl += net_pnl
         reduced = {
             "timestamp": event.timestamp,
             "signal_id": position["signal_id"],
             "symbol": position["symbol"],
             "side": position["side"].value,
+            "setup": position.get("setup", "unknown"),
             "quantity": quantity,
+            "remaining_quantity": position["quantity"],
             "entry_price": position["entry_price"],
+            "signal_entry_price": position.get("signal_entry_price", position["entry_price"]),
             "close_price": close_fill["fill_price"],
             "stop_price": position["stop_price"],
+            "initial_stop_price": position.get("initial_stop_price", position["stop_price"]),
             "target_price": position["target_price"],
+            "entry_order_type": position.get("entry_order_type", "market"),
             "gross_realized_pnl": gross_pnl,
             "entry_fee": entry_fee,
             "close_fee": close_fill["fee"],
@@ -593,6 +791,13 @@ class LiveOrderflowStore:
             "realized_pnl": net_pnl,
             "net_realized_pnl": net_pnl,
             "exit_reason": reason,
+            "opened_at": position.get("opened_at", event.timestamp),
+            "break_even_shifted": bool(position.get("break_even_shifted", False)),
+            "absorption_reduced": bool(position.get("absorption_reduced", False)),
+            "first_take_profit_done": bool(position.get("first_take_profit_done", False)),
+            "trail_stop_price": position.get("trail_stop_price"),
+            "max_favorable_move": position.get("max_favorable_move", 0.0),
+            "max_adverse_move": position.get("max_adverse_move", 0.0),
         }
         self._details["paper"]["closed_positions"].append(reduced)
         self._details["paper"]["pnl_events"].append(
@@ -630,9 +835,15 @@ class LiveOrderflowStore:
         trigger_price, exit_reason = self._triggered_close(event.price)
         if trigger_price is None:
             return
+        self._close_position(event, trigger_price, exit_reason or "target")
+
+    def _close_position(self, event: TradeEvent, trigger_price: float, exit_reason: str) -> None:
+        if self._position is None:
+            return
 
         position = self._position
         self._position = None
+        self._last_close_time = event.timestamp
         close_fill = self._exit_fill(position, trigger_price)
         gross_pnl = self._position_pnl(position, close_fill["fill_price"])
         net_pnl = gross_pnl - position["entry_fee"] - close_fill["fee"]
@@ -644,17 +855,29 @@ class LiveOrderflowStore:
             "signal_id": position["signal_id"],
             "symbol": position["symbol"],
             "side": position["side"].value,
+            "setup": position.get("setup", "unknown"),
             "quantity": position["quantity"],
             "entry_price": position["entry_price"],
+            "signal_entry_price": position.get("signal_entry_price", position["entry_price"]),
             "close_price": close_fill["fill_price"],
             "stop_price": position["stop_price"],
+            "initial_stop_price": position.get("initial_stop_price", position["stop_price"]),
             "target_price": position["target_price"],
+            "entry_order_type": position.get("entry_order_type", "market"),
             "gross_realized_pnl": gross_pnl,
             "entry_fee": position["entry_fee"],
             "close_fee": close_fill["fee"],
             "fee": position["entry_fee"] + close_fill["fee"],
             "realized_pnl": net_pnl,
             "net_realized_pnl": net_pnl,
+            "exit_reason": exit_reason,
+            "opened_at": position.get("opened_at", event.timestamp),
+            "break_even_shifted": bool(position.get("break_even_shifted", False)),
+            "absorption_reduced": bool(position.get("absorption_reduced", False)),
+            "first_take_profit_done": bool(position.get("first_take_profit_done", False)),
+            "trail_stop_price": position.get("trail_stop_price"),
+            "max_favorable_move": position.get("max_favorable_move", 0.0),
+            "max_adverse_move": position.get("max_adverse_move", 0.0),
         }
         self._details["paper"]["closed_positions"].append(closed)
         self._details["paper"]["pnl_events"].append(
@@ -684,15 +907,42 @@ class LiveOrderflowStore:
         side = self._position["side"].value
         if side == "long":
             if current_price <= self._position["stop_price"]:
-                return self._position["stop_price"], "stop_loss"
+                reason = "trailing_stop" if self._position.get("trail_stop_price") is not None else "stop_loss"
+                return self._position["stop_price"], reason
             if current_price >= self._position["target_price"]:
                 return self._position["target_price"], "target"
         else:
             if current_price >= self._position["stop_price"]:
-                return self._position["stop_price"], "stop_loss"
+                reason = "trailing_stop" if self._position.get("trail_stop_price") is not None else "stop_loss"
+                return self._position["stop_price"], reason
             if current_price <= self._position["target_price"]:
                 return self._position["target_price"], "target"
+        if self._last_event_time - int(self._position.get("opened_at", self._last_event_time)) >= self.settings.execution.max_holding_ms:
+            return current_price, "time_stop"
         return None, None
+
+    def _entry_limit_price(self, signal: TradeSignal) -> float:
+        adjustment = self.settings.execution.limit_entry_pullback_bps / 10_000
+        if signal.side == SignalSide.LONG:
+            return self._round_price(signal.entry_price * (1 - adjustment), "down")
+        return self._round_price(signal.entry_price * (1 + adjustment), "up")
+
+    def _entry_limit_fill(self, signal: TradeSignal, quantity: float, limit_price: float, event_price: float) -> dict[str, float | str]:
+        quantity = self._round_quantity(quantity)
+        if signal.side == SignalSide.LONG:
+            fill_price = self._round_price(min(limit_price, event_price), "down")
+            action = "buy"
+        else:
+            fill_price = self._round_price(max(limit_price, event_price), "up")
+            action = "sell"
+        return {
+            "action": action,
+            "quantity": quantity,
+            "reference_price": limit_price,
+            "fill_price": fill_price,
+            "slippage_bps": 0.0,
+            "fee": abs(fill_price * quantity) * self._instrument.taker_fee_rate,
+        }
 
     def _entry_fill(self, signal: TradeSignal, quantity: float, slippage_bps: float) -> dict[str, float | str]:
         quantity = self._round_quantity(quantity)

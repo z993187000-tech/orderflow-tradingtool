@@ -1,4 +1,9 @@
-from .binance import BinanceAuthenticatedClient, BinanceHistoricalAggTradeClient, create_authenticated_client_if_live
+from .binance import (
+    BinanceAuthenticatedClient,
+    BinanceHistoricalAggTradeClient,
+    BinanceHistoricalKlineClient,
+    create_authenticated_client_if_live,
+)
 from .distribution import TradeSizeDistribution
 from .events import ForceOrderEvent, KlineEvent, MarkPriceEvent, QuoteEvent, SpotPriceEvent, TradeEvent
 from .features import AggressionBubble, AggressionBubbleDetector, AtrTracker
@@ -11,6 +16,7 @@ __all__ = [
     "AtrTracker",
     "BinanceAuthenticatedClient",
     "BinanceHistoricalAggTradeClient",
+    "BinanceHistoricalKlineClient",
     "create_authenticated_client_if_live",
     "FlashCrashDetector",
     "ForceOrderEvent",

@@ -4,7 +4,7 @@ import time
 import unittest
 from pathlib import Path
 
-from crypto_perp_tool.market_data import MarkPriceEvent, QuoteEvent, SpotPriceEvent, TradeEvent
+from crypto_perp_tool.market_data import KlineEvent, MarkPriceEvent, QuoteEvent, SpotPriceEvent, TradeEvent
 from crypto_perp_tool.market_data.binance import BinanceInstrumentSpec
 from crypto_perp_tool.types import CircuitBreakerReason, SignalSide, TradeSignal
 from crypto_perp_tool.web.live_store import LiveOrderflowStore
@@ -55,6 +55,36 @@ class CapturingStaleSignalEngine:
 
 
 class LiveOrderflowStoreTests(unittest.TestCase):
+    def test_live_store_seeds_and_replaces_historical_5m_klines(self):
+        store = LiveOrderflowStore(symbol="BTCUSDT", max_events=10)
+        seed = [
+            KlineEvent(1_000, 300_999, "BTCUSDT", "5m", 100, 110, 95, 105, 12, 1_200, 10, True),
+            KlineEvent(301_000, 600_999, "BTCUSDT", "5m", 105, 115, 101, 112, 8, 900, 6, True),
+        ]
+
+        store.seed_klines(seed)
+        store.add_kline(KlineEvent(301_000, 600_999, "BTCUSDT", "5m", 105, 116, 100, 111, 9, 1_000, 7, False))
+        view = store.view()
+
+        self.assertEqual([kline["timestamp"] for kline in view["klines"]], [1_000, 301_000])
+        self.assertEqual(view["klines"][-1]["high"], 116)
+        self.assertFalse(view["klines"][-1]["is_closed"])
+
+    def test_live_store_keeps_only_recent_8h_5m_kline_history(self):
+        store = LiveOrderflowStore(symbol="BTCUSDT", max_events=10)
+        old = KlineEvent(0, 299_999, "BTCUSDT", "5m", 90, 95, 85, 92, 1, 90, 1, True)
+        recent = [
+            KlineEvent(index * 300_000, index * 300_000 + 299_999, "BTCUSDT", "5m", 100, 101, 99, 100.5, 1, 100, 1, True)
+            for index in range(1, 98)
+        ]
+
+        store.seed_klines([old, *recent])
+        klines = store.view()["klines"]
+
+        self.assertEqual(len(klines), 96)
+        self.assertEqual(klines[0]["timestamp"], 600_000)
+        self.assertEqual(klines[-1]["timestamp"], 29_100_000)
+
     def test_live_store_builds_orderflow_view_from_recent_events(self):
         store = LiveOrderflowStore(symbol="BTCUSDT", max_events=10)
 
@@ -332,7 +362,9 @@ class LiveOrderflowStoreTests(unittest.TestCase):
             for index in range(30):
                 event = TradeEvent(1_000 + index * 100, "BTCUSDT", 100 + index * 0.01, 1, False)
                 store.add_trade(event, received_at=event.timestamp)
+            store.add_trade(TradeEvent(5_000, "BTCUSDT", 99.9, 1, True), received_at=5_000)
             store.add_trade(TradeEvent(10_000, "BTCUSDT", 106, 1, False), received_at=10_000)
+            store.add_trade(TradeEvent(10_100, "BTCUSDT", 106, 1, False), received_at=10_100)
 
             rows = [json.loads(line) for line in journal_path.read_text(encoding="utf-8").splitlines()]
             view = store.view()
@@ -342,11 +374,12 @@ class LiveOrderflowStoreTests(unittest.TestCase):
         close = next(row["payload"] for row in rows if row["type"] == "position_closed")
 
         self.assertTrue({"signal", "risk_decision", "paper_fill", "paper_order", "position_closed", "pnl"} <= event_types)
-        self.assertGreater(fill["fill_price"], 100.1)
+        self.assertLessEqual(fill["fill_price"], 99.9)
+        self.assertEqual(fill["entry_order_type"], "limit")
         self.assertIn("slippage_bps", fill)
         self.assertIn("fee", fill)
         self.assertIn("net_realized_pnl", close)
-        self.assertEqual(view["summary"]["closed_positions"], 1)
+        self.assertEqual(view["summary"]["closed_positions"], 2)
         self.assertGreater(view["summary"]["realized_pnl"], 0)
 
     def test_live_paper_fill_uses_exchange_info_tick_and_step_size(self):
@@ -375,6 +408,7 @@ class LiveOrderflowStoreTests(unittest.TestCase):
         for index in range(30):
             event = TradeEvent(1_000 + index * 100, "BTCUSDT", 100 + index * 0.01, 1, False)
             store.add_trade(event, received_at=event.timestamp)
+        store.add_trade(TradeEvent(5_000, "BTCUSDT", 99.5, 1, True), received_at=5_000)
 
         order = store.view()["details"]["paper"]["orders"][0]
 
@@ -418,7 +452,7 @@ class LiveOrderflowStoreTests(unittest.TestCase):
     def test_live_store_marks_aggression_bubbles_for_frontend(self):
         store = LiveOrderflowStore(symbol="BTCUSDT", max_events=20)
 
-        store.add_trade(TradeEvent(1_000, "BTCUSDT", 100, 12, False), received_at=1_000)
+        store.add_trade(TradeEvent(1_000, "BTCUSDT", 100, 25, False), received_at=1_000)
         store.add_trade(TradeEvent(2_000, "BTCUSDT", 99, 55, True), received_at=2_000)
 
         view = store.view()
@@ -453,6 +487,7 @@ class LiveOrderflowStoreTests(unittest.TestCase):
         for index in range(30):
             event = TradeEvent(1_000 + index * 100, "BTCUSDT", 100, 1, False)
             store.add_trade(event, received_at=event.timestamp)
+        store.add_trade(TradeEvent(5_000, "BTCUSDT", 99.9, 1, True), received_at=5_000)
         store.add_trade(TradeEvent(10_000, "BTCUSDT", 116, 1, False), received_at=10_000)
 
         view = store.view()
@@ -460,7 +495,7 @@ class LiveOrderflowStoreTests(unittest.TestCase):
         actions = view["details"]["paper"]["protective_actions"]
 
         self.assertIsNotNone(position)
-        self.assertEqual(position["stop_price"], position["entry_price"])
+        self.assertGreaterEqual(position["stop_price"], position["entry_price"])
         self.assertTrue(any(action["action"] == "break_even_shift" for action in actions))
         self.assertEqual(view["summary"]["last_break_even_shift"]["action"], "break_even_shift")
 
@@ -485,6 +520,7 @@ class LiveOrderflowStoreTests(unittest.TestCase):
         for index in range(30):
             event = TradeEvent(1_000 + index * 100, "BTCUSDT", 100, 1, False)
             store.add_trade(event, received_at=event.timestamp)
+        store.add_trade(TradeEvent(5_000, "BTCUSDT", 99.9, 1, True), received_at=5_000)
         original_quantity = store.view()["summary"]["open_position"]["quantity"]
         store.add_trade(TradeEvent(10_000, "BTCUSDT", 100.4, 60, False), received_at=10_000)
 
@@ -497,11 +533,84 @@ class LiveOrderflowStoreTests(unittest.TestCase):
         self.assertTrue(any(action["action"] == "absorption_reduce" for action in actions))
         self.assertEqual(view["summary"]["last_absorption_reduce"]["action"], "absorption_reduce")
 
+    def test_live_paper_waits_for_limit_pullback_before_filling_entry(self):
+        signal = TradeSignal(
+            id="sig-live-limit-entry",
+            symbol="BTCUSDT",
+            side=SignalSide.LONG,
+            setup="test_limit_entry",
+            entry_price=100,
+            stop_price=90,
+            target_price=130,
+            confidence=0.8,
+            reasons=("test",),
+            invalidation_rules=("stop",),
+            created_at=4_000,
+        )
+        store = LiveOrderflowStore(symbol="BTCUSDT", max_events=60, enable_signals=True)
+        store._signal_engine = OneShotSignalEngine(signal)
+        store.add_quote(QuoteEvent(3_900, "BTCUSDT", 99.9, 100.1))
+
+        for index in range(30):
+            event = TradeEvent(1_000 + index * 100, "BTCUSDT", 100, 1, False)
+            store.add_trade(event, received_at=event.timestamp)
+
+        self.assertIsNone(store.view()["summary"]["open_position"])
+        self.assertEqual(store.view()["summary"]["orders"], 0)
+
+        store.add_trade(TradeEvent(5_000, "BTCUSDT", 99.9, 1, True), received_at=5_000)
+        view = store.view()
+        order = view["details"]["paper"]["orders"][0]
+
+        self.assertIsNotNone(view["summary"]["open_position"])
+        self.assertEqual(view["summary"]["orders"], 1)
+        self.assertEqual(order["entry_order_type"], "limit")
+        self.assertEqual(order["status"], "filled")
+
+    def test_live_paper_partial_take_profit_then_trailing_stop(self):
+        signal = TradeSignal(
+            id="sig-live-partial-trail",
+            symbol="BTCUSDT",
+            side=SignalSide.LONG,
+            setup="test_partial_trail",
+            entry_price=100,
+            stop_price=90,
+            target_price=130,
+            confidence=0.8,
+            reasons=("test",),
+            invalidation_rules=("stop",),
+            created_at=4_000,
+        )
+        store = LiveOrderflowStore(symbol="BTCUSDT", max_events=80, enable_signals=True)
+        store._signal_engine = OneShotSignalEngine(signal)
+        store.add_quote(QuoteEvent(3_900, "BTCUSDT", 99.9, 100.1))
+
+        for index in range(30):
+            event = TradeEvent(1_000 + index * 100, "BTCUSDT", 100, 1, False)
+            store.add_trade(event, received_at=event.timestamp)
+        store.add_trade(TradeEvent(5_000, "BTCUSDT", 99.9, 1, True), received_at=5_000)
+        original_quantity = store.view()["summary"]["open_position"]["quantity"]
+
+        store.add_trade(TradeEvent(6_000, "BTCUSDT", 110, 1, False), received_at=6_000)
+        view = store.view()
+        partial = view["details"]["paper"]["closed_positions"][0]
+
+        self.assertEqual(partial["exit_reason"], "partial_take_profit")
+        self.assertLess(view["summary"]["open_position"]["quantity"], original_quantity)
+
+        store.add_trade(TradeEvent(7_000, "BTCUSDT", 112, 1, False), received_at=7_000)
+        trail_stop = store.view()["summary"]["open_position"]["stop_price"]
+        store.add_trade(TradeEvent(8_000, "BTCUSDT", trail_stop - 0.1, 1, True), received_at=8_000)
+        closed = store.view()["details"]["paper"]["closed_positions"][-1]
+
+        self.assertIsNone(store.view()["summary"]["open_position"])
+        self.assertEqual(closed["exit_reason"], "trailing_stop")
+
     def test_live_store_summary_exposes_strategy_explainability_state(self):
         store = LiveOrderflowStore(symbol="BTCUSDT", max_events=20)
 
         for event in [
-            TradeEvent(1_000, "BTCUSDT", 100, 12, False),
+            TradeEvent(1_000, "BTCUSDT", 100, 30, False),
             TradeEvent(61_000, "BTCUSDT", 106, 1, False),
             TradeEvent(62_000, "BTCUSDT", 110, 1, False),
             TradeEvent(63_000, "BTCUSDT", 104, 1, True),
@@ -544,6 +653,7 @@ class LiveOrderflowStoreTests(unittest.TestCase):
             store.add_quote(QuoteEvent(3_900, "BTCUSDT", 99.9, 100.1))
             for index in range(30):
                 store.add_trade(TradeEvent(1_000 + index * 100, "BTCUSDT", 100 + index * 0.01, 1, False), received_at=1_000 + index * 100)
+            store.add_trade(TradeEvent(5_000, "BTCUSDT", 99.9, 1, True), received_at=5_000)
             store.add_trade(TradeEvent(10_000, "BTCUSDT", 106, 1, False), received_at=10_000)
             view1 = store.view()
 
@@ -585,6 +695,7 @@ class LiveOrderflowStoreTests(unittest.TestCase):
             store.add_quote(QuoteEvent(4_900, "BTCUSDT", 199.9, 200.1))
             for index in range(30):
                 store.add_trade(TradeEvent(1_000 + index * 100, "BTCUSDT", 200 + index * 0.01, 1, True), received_at=1_000 + index * 100)
+            store.add_trade(TradeEvent(5_000, "BTCUSDT", 200.5, 1, False), received_at=5_000)
             store.add_trade(TradeEvent(11_000, "BTCUSDT", 179, 1, False), received_at=11_000)
             view1 = store.view()
 
@@ -624,6 +735,7 @@ class LiveOrderflowStoreTests(unittest.TestCase):
             store.add_quote(QuoteEvent(3_900, "BTCUSDT", 99.9, 100.1))
             for index in range(30):
                 store.add_trade(TradeEvent(1_000 + index * 100, "BTCUSDT", 100 + index * 0.01, 1, False), received_at=1_000 + index * 100)
+            store.add_trade(TradeEvent(5_000, "BTCUSDT", 99.9, 1, True), received_at=5_000)
             store.add_trade(TradeEvent(10_000, "BTCUSDT", 106, 1, False), received_at=10_000)
             view1 = store.view()
 

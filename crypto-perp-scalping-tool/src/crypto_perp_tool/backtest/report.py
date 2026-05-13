@@ -58,7 +58,7 @@ class BacktestReporter:
             max_daily_loss=self._max_daily_loss(closed),
             max_consecutive_losses=self._max_consecutive_losses(pnls),
             average_holding_time_ms=self._average_holding_time(closed),
-            average_slippage_bps=self._average_slippage(orders),
+            average_slippage_bps=self._average_slippage(orders, closed),
             by_setup=self._by_setup(closed, signals),
             data_quality=self._data_quality(closed, orders, signals),
             config_version=self.config_version,
@@ -111,8 +111,12 @@ class BacktestReporter:
         ]
         return sum(durations) / len(durations) if durations else 0.0
 
-    def _average_slippage(self, orders: list[dict[str, Any]]) -> float:
-        values = [float(item["slippage_bps"]) for item in orders if item.get("slippage_bps") is not None]
+    def _average_slippage(self, orders: list[dict[str, Any]], closed: list[dict[str, Any]]) -> float:
+        values = [
+            float(item["slippage_bps"])
+            for item in (*orders, *closed)
+            if item.get("slippage_bps") is not None
+        ]
         return sum(values) / len(values) if values else 0.0
 
     def _by_setup(self, closed: list[dict[str, Any]], signals: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -140,5 +144,9 @@ class BacktestReporter:
             "closed_positions": "present" if closed else "missing",
             "orders": "present" if orders else "missing",
             "signals": "present" if signals else "missing",
-            "slippage": "present" if any(order.get("slippage_bps") is not None for order in orders) else "missing",
+            "slippage": (
+                "present"
+                if any(item.get("slippage_bps") is not None for item in (*orders, *closed))
+                else "missing"
+            ),
         }

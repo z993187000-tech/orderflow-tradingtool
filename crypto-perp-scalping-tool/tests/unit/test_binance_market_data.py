@@ -1,4 +1,5 @@
 import unittest
+import unittest.mock
 
 from crypto_perp_tool.market_data.binance import (
     BinanceAggTradeClient,
@@ -6,6 +7,7 @@ from crypto_perp_tool.market_data.binance import (
     BinanceBookTickerParser,
     BinanceExchangeInfoClient,
     BinanceExchangeInfoParser,
+    BinanceHistoricalKlineClient,
     BinanceMarkPriceParser,
     BinanceSpotTradeParser,
     BinanceStreamConfig,
@@ -319,6 +321,76 @@ class BinanceHistoricalAggTradeClientTests(unittest.TestCase):
         self.assertIn("endTime=1700000100000", url)
         self.assertIn("limit=500", url)
         self.assertIn("/fapi/v1/aggTrades", url)
+
+
+class BinanceHistoricalKlineClientTests(unittest.TestCase):
+    def test_download_returns_parsed_kline_events(self):
+        payload = [
+            [
+                1700000000000,
+                "96000.00",
+                "96150.00",
+                "95900.00",
+                "96100.00",
+                "12.500",
+                1700000299999,
+                "1200000.00",
+                321,
+                "6.200",
+                "595000.00",
+                "0",
+            ],
+            [
+                1700000300000,
+                "96100.00",
+                "96200.00",
+                "96050.00",
+                "96180.00",
+                "9.250",
+                1700000599999,
+                "890000.00",
+                244,
+                "4.100",
+                "395000.00",
+                "0",
+            ],
+        ]
+        client = BinanceHistoricalKlineClient(loader=lambda url, timeout: payload)
+
+        klines = client.download("BTCUSDT", interval="5m", limit=2)
+
+        self.assertEqual(len(klines), 2)
+        self.assertEqual(klines[0].symbol, "BTCUSDT")
+        self.assertEqual(klines[0].interval, "5m")
+        self.assertEqual(klines[0].timestamp, 1700000000000)
+        self.assertEqual(klines[0].close_time, 1700000299999)
+        self.assertEqual(klines[0].open, 96000.00)
+        self.assertEqual(klines[0].high, 96150.00)
+        self.assertEqual(klines[0].low, 95900.00)
+        self.assertEqual(klines[0].close, 96100.00)
+        self.assertEqual(klines[0].volume, 12.5)
+        self.assertEqual(klines[0].quote_volume, 1200000.0)
+        self.assertEqual(klines[0].trade_count, 321)
+        self.assertTrue(klines[0].is_closed)
+
+    def test_fetch_builds_futures_klines_url(self):
+        requested = []
+
+        def fake_loader(url: str, timeout: float):
+            requested.append(url)
+            return []
+
+        client = BinanceHistoricalKlineClient(loader=fake_loader)
+
+        client.fetch("btcusdt", interval="5m", limit=96, start_time=1700000000000, end_time=1700028800000)
+        url = requested[0]
+
+        self.assertIn("symbol=BTCUSDT", url)
+        self.assertIn("interval=5m", url)
+        self.assertIn("limit=96", url)
+        self.assertIn("startTime=1700000000000", url)
+        self.assertIn("endTime=1700028800000", url)
+        self.assertIn("/fapi/v1/klines", url)
 
 
 if __name__ == "__main__":

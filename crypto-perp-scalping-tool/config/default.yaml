@@ -15,11 +15,19 @@ execution:
   max_data_lag_ms: 2000
   btc_max_slippage_bps: 3
   eth_max_slippage_bps: 4
+  pending_entry_timeout_ms: 7000
+  limit_entry_pullback_bps: 1.0
+  post_close_cooldown_ms: 30000
+  first_take_profit_r: 1.0
+  first_take_profit_ratio: 0.5
+  trail_after_r: 1.0
+  trail_atr_multiple: 0.35
+  max_holding_ms: 180000
 profile:
   session_timezone: UTC
   value_area_ratio: 0.70
   rolling_window_minutes: 240
-  btc_bin_size: 10
+  btc_bin_size: 5
   eth_bin_size: 2
   asia_start_hour: 0
   asia_end_hour: 7
@@ -36,7 +44,7 @@ signals:
     - 30
     - 60
   funding_blackout_minutes: 2
-  aggression_large_threshold: 10
+  aggression_large_threshold: 20
   aggression_block_threshold: 50
   atr_period: 14
   session_gating_enabled: true

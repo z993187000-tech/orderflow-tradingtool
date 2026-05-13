@@ -24,7 +24,7 @@ class AggressionBubble:
 class AggressionBubbleDetector:
     def __init__(
         self,
-        large_threshold: float = 10.0,
+        large_threshold: float = 20.0,
         block_threshold: float = 50.0,
         dynamic_enabled: bool = False,
         percentile_large: float = 0.95,

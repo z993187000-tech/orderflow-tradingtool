@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from crypto_perp_tool.execution.paper_engine import PaperTradingEngine
+from crypto_perp_tool.execution.paper_engine import PaperExecutionConfig, PaperTradingEngine
 from crypto_perp_tool.market_data import TradeEvent
 from crypto_perp_tool.types import SignalSide, TradeSignal
 
@@ -111,10 +111,29 @@ class PaperTradingEngineTests(unittest.TestCase):
         self.assertIn("position_closed", marker_types)
 
     def test_does_not_open_a_new_order_while_position_is_open(self):
-        engine = PaperTradingEngine(symbol="BTCUSDT", equity=10_000, signal_cooldown_ms=0)
+        signal = TradeSignal(
+            id="sig-open-position",
+            symbol="BTCUSDT",
+            side=SignalSide.LONG,
+            setup="test_open_position",
+            entry_price=100,
+            stop_price=90,
+            target_price=130,
+            confidence=0.8,
+            reasons=("test",),
+            invalidation_rules=("stop",),
+            created_at=1_000,
+        )
+        engine = PaperTradingEngine(
+            symbol="BTCUSDT",
+            equity=10_000,
+            signal_cooldown_ms=0,
+            execution_config=PaperExecutionConfig(limit_entry_pullback_bps=0.0),
+        )
+        engine.signals = OneShotSignalEngine(signal)
 
-        for event in sample_trade_events()[:17]:
-            engine.process_trade(event, received_at=event.timestamp)
+        engine.process_trade(TradeEvent(1_000, "BTCUSDT", 100, 1, False), received_at=1_000)
+        engine.process_trade(TradeEvent(2_000, "BTCUSDT", 100, 1, True), received_at=2_000)
         first_summary = engine.summary()
         self.assertEqual(first_summary["orders"], 1)
         self.assertIsNotNone(first_summary["open_position"])
@@ -189,9 +208,29 @@ class PaperTradingEngineTests(unittest.TestCase):
     def test_restores_open_position_from_live_paper_journal(self):
         with tempfile.TemporaryDirectory() as tmp:
             journal_path = Path(tmp) / "live-paper.jsonl"
-            engine = PaperTradingEngine(symbol="BTCUSDT", equity=10_000, signal_cooldown_ms=0, journal_path=journal_path)
-            for event in sample_trade_events()[:17]:
-                engine.process_trade(event, received_at=event.timestamp)
+            signal = TradeSignal(
+                id="sig-restore-open",
+                symbol="BTCUSDT",
+                side=SignalSide.LONG,
+                setup="test_restore_open",
+                entry_price=100,
+                stop_price=90,
+                target_price=130,
+                confidence=0.8,
+                reasons=("test",),
+                invalidation_rules=("stop",),
+                created_at=1_000,
+            )
+            engine = PaperTradingEngine(
+                symbol="BTCUSDT",
+                equity=10_000,
+                signal_cooldown_ms=0,
+                journal_path=journal_path,
+                execution_config=PaperExecutionConfig(limit_entry_pullback_bps=0.0),
+            )
+            engine.signals = OneShotSignalEngine(signal)
+            engine.process_trade(TradeEvent(1_000, "BTCUSDT", 100, 1, False), received_at=1_000)
+            engine.process_trade(TradeEvent(2_000, "BTCUSDT", 100, 1, True), received_at=2_000)
 
             restored = PaperTradingEngine(symbol="BTCUSDT", equity=10_000, signal_cooldown_ms=0, journal_path=journal_path)
             summary = restored.summary()
@@ -244,14 +283,124 @@ class PaperTradingEngineTests(unittest.TestCase):
         engine.signals = OneShotSignalEngine(signal)
 
         engine.process_trade(TradeEvent(1_000, "BTCUSDT", 100, 1, False), received_at=1_000)
-        engine.process_trade(TradeEvent(2_000, "BTCUSDT", 116, 1, False), received_at=2_000)
+        engine.process_trade(TradeEvent(2_000, "BTCUSDT", 99.9, 1, True), received_at=2_000)
+        engine.process_trade(TradeEvent(3_000, "BTCUSDT", 116, 1, False), received_at=3_000)
 
         summary = engine.summary()
         position = summary["open_position"]
 
         self.assertIsNotNone(position)
-        self.assertEqual(position["stop_price"], position["entry_price"])
+        self.assertGreaterEqual(position["stop_price"], position["entry_price"])
         self.assertTrue(any(action["action"] == "break_even_shift" for action in summary["protective_actions"]))
+
+    def test_limit_entry_waits_for_pullback_before_opening_position(self):
+        signal = TradeSignal(
+            id="sig-limit-entry",
+            symbol="BTCUSDT",
+            side=SignalSide.LONG,
+            setup="test_limit_entry",
+            entry_price=100,
+            stop_price=90,
+            target_price=130,
+            confidence=0.8,
+            reasons=("test",),
+            invalidation_rules=("stop",),
+            created_at=1_000,
+        )
+        engine = PaperTradingEngine(
+            symbol="BTCUSDT",
+            equity=10_000,
+            signal_cooldown_ms=0,
+            execution_config=PaperExecutionConfig(limit_entry_pullback_bps=100.0),
+        )
+        engine.signals = OneShotSignalEngine(signal)
+
+        engine.process_trade(TradeEvent(1_000, "BTCUSDT", 100, 1, False), received_at=1_000)
+        self.assertIsNone(engine.summary()["open_position"])
+        self.assertEqual(engine.summary()["orders"], 0)
+
+        engine.process_trade(TradeEvent(2_000, "BTCUSDT", 99, 1, True), received_at=2_000)
+        summary = engine.summary()
+        order = engine.details()["paper"]["orders"][0]
+
+        self.assertIsNotNone(summary["open_position"])
+        self.assertEqual(summary["orders"], 1)
+        self.assertEqual(order["entry_order_type"], "limit")
+        self.assertEqual(order["status"], "filled")
+        self.assertLessEqual(summary["open_position"]["entry_price"], 99)
+
+    def test_partial_take_profit_then_trailing_stop_manages_remaining_position(self):
+        signal = TradeSignal(
+            id="sig-partial-trail",
+            symbol="BTCUSDT",
+            side=SignalSide.LONG,
+            setup="test_partial_trail",
+            entry_price=100,
+            stop_price=90,
+            target_price=130,
+            confidence=0.8,
+            reasons=("test",),
+            invalidation_rules=("stop",),
+            created_at=1_000,
+        )
+        engine = PaperTradingEngine(
+            symbol="BTCUSDT",
+            equity=10_000,
+            signal_cooldown_ms=0,
+            execution_config=PaperExecutionConfig(limit_entry_pullback_bps=0.0),
+        )
+        engine.signals = OneShotSignalEngine(signal)
+
+        engine.process_trade(TradeEvent(1_000, "BTCUSDT", 100, 1, False), received_at=1_000)
+        engine.process_trade(TradeEvent(2_000, "BTCUSDT", 100, 1, True), received_at=2_000)
+        original_quantity = engine.summary()["open_position"]["quantity"]
+
+        engine.process_trade(TradeEvent(3_000, "BTCUSDT", 110, 1, False), received_at=3_000)
+        after_partial = engine.summary()["open_position"]
+        partial = engine.details()["paper"]["closed_positions"][0]
+
+        self.assertEqual(partial["exit_reason"], "partial_take_profit")
+        self.assertLess(after_partial["quantity"], original_quantity)
+        self.assertGreaterEqual(after_partial["stop_price"], after_partial["entry_price"])
+
+        engine.process_trade(TradeEvent(4_000, "BTCUSDT", 112, 1, False), received_at=4_000)
+        trail_stop = engine.summary()["open_position"]["stop_price"]
+        engine.process_trade(TradeEvent(5_000, "BTCUSDT", trail_stop - 0.1, 1, True), received_at=5_000)
+        closed = engine.details()["paper"]["closed_positions"][-1]
+
+        self.assertIsNone(engine.summary()["open_position"])
+        self.assertEqual(closed["exit_reason"], "trailing_stop")
+
+    def test_orderflow_invalidation_can_exit_without_minimum_hold_time(self):
+        signal = TradeSignal(
+            id="sig-orderflow-exit",
+            symbol="BTCUSDT",
+            side=SignalSide.LONG,
+            setup="test_orderflow_exit",
+            entry_price=100,
+            stop_price=90,
+            target_price=130,
+            confidence=0.8,
+            reasons=("test",),
+            invalidation_rules=("delta flips negative",),
+            created_at=1_000,
+        )
+        engine = PaperTradingEngine(
+            symbol="BTCUSDT",
+            equity=10_000,
+            signal_cooldown_ms=0,
+            execution_config=PaperExecutionConfig(limit_entry_pullback_bps=0.0),
+        )
+        engine.signals = OneShotSignalEngine(signal)
+
+        engine.process_trade(TradeEvent(1_000, "BTCUSDT", 100, 1, False), received_at=1_000)
+        engine.process_trade(TradeEvent(2_000, "BTCUSDT", 100, 1, True), received_at=2_000)
+        engine.process_trade(TradeEvent(2_100, "BTCUSDT", 99.8, 50, True), received_at=2_100)
+
+        closed = engine.details()["paper"]["closed_positions"][-1]
+        self.assertIsNone(engine.summary()["open_position"])
+        self.assertEqual(closed["exit_reason"], "orderflow_invalidation")
+        self.assertLess(closed["timestamp"] - closed["opened_at"], 2_000)
 
 
 if __name__ == "__main__":

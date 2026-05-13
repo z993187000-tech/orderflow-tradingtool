@@ -6,18 +6,18 @@ from crypto_perp_tool.market_data.features import AggressionBubbleDetector, AtrT
 
 class OrderflowFeatureTests(unittest.TestCase):
     def test_aggression_bubble_detector_marks_buy_sell_and_size_tier(self):
-        detector = AggressionBubbleDetector(large_threshold=10, block_threshold=50)
+        detector = AggressionBubbleDetector(large_threshold=20, block_threshold=50)
 
-        self.assertIsNone(detector.detect(TradeEvent(1_000, "BTCUSDT", 100, 9.99, False)))
+        self.assertIsNone(detector.detect(TradeEvent(1_000, "BTCUSDT", 100, 15, False)))
 
-        buy = detector.detect(TradeEvent(2_000, "BTCUSDT", 101, 12, False))
+        buy = detector.detect(TradeEvent(2_000, "BTCUSDT", 101, 25, False))
         sell = detector.detect(TradeEvent(3_000, "BTCUSDT", 99, 55, True))
 
         self.assertIsNotNone(buy)
         self.assertEqual(buy.side, "buy")
         self.assertEqual(buy.tier, "large")
-        self.assertEqual(buy.quantity, 12)
-        self.assertEqual(buy.label, "BIG BUY 12.00")
+        self.assertEqual(buy.quantity, 25)
+        self.assertEqual(buy.label, "BIG BUY 25.00")
 
         self.assertIsNotNone(sell)
         self.assertEqual(sell.side, "sell")

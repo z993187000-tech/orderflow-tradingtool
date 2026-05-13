@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import time
 from collections import defaultdict
 
@@ -107,27 +108,25 @@ class VolumeProfileEngine:
         return tuple(levels)
 
     def _bin_price(self, price: float) -> float:
-        return round(price / self.bin_size) * self.bin_size
+        return math.floor(price / self.bin_size) * self.bin_size
 
     def _level(self, level_type: ProfileLevelType, price: float, strength: float, window: str) -> ProfileLevel:
-        half_bin = self.bin_size / 2
         return ProfileLevel(
             type=level_type,
             price=price,
-            lower_bound=price - half_bin,
-            upper_bound=price + half_bin,
+            lower_bound=price,
+            upper_bound=price + self.bin_size,
             strength=strength,
             window=window,
         )
 
     def _boundary_level(self, level_type: ProfileLevelType, bin_price: float, side: str, strength: float, window: str) -> ProfileLevel:
-        half_bin = self.bin_size / 2
-        price = bin_price - half_bin if side == "lower" else bin_price + half_bin
+        price = bin_price if side == "lower" else bin_price + self.bin_size
         return ProfileLevel(
             type=level_type,
             price=price,
-            lower_bound=bin_price - half_bin,
-            upper_bound=bin_price + half_bin,
+            lower_bound=bin_price,
+            upper_bound=bin_price + self.bin_size,
             strength=strength,
             window=window,
         )

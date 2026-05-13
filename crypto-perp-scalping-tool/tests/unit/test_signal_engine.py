@@ -167,7 +167,7 @@ class SignalEngineTests(unittest.TestCase):
             profile_levels=levels,
             cumulative_delta=80.0,
             aggression_bubble_side="buy",
-            aggression_bubble_quantity=12.0,
+            aggression_bubble_quantity=25.0,
             aggression_bubble_price=111.8,
             aggression_bubble_tier="large",
             atr_1m_14=3.0,
