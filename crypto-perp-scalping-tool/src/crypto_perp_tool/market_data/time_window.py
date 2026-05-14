@@ -17,11 +17,11 @@ class TimeWindowBuffer(Generic[T]):
         self.latest_timestamp = 0
         self._lock = threading.Lock()
 
-    def append(self, timestamp: int, item: T) -> None:
+    def append(self, timestamp: int, item: T) -> list[T]:
         with self._lock:
             self.latest_timestamp = max(self.latest_timestamp, int(timestamp))
             self._items.append((int(timestamp), item))
-            self._evict(self.latest_timestamp)
+            return self._evict(self.latest_timestamp)
 
     def items(self) -> list[T]:
         with self._lock:
@@ -37,13 +37,41 @@ class TimeWindowBuffer(Generic[T]):
             return [item for timestamp, item in self._items if timestamp >= cutoff and timestamp <= int(now_ms)]
 
     def count_since(self, now_ms: int, window_ms: int) -> int:
-        return len(self.items_since(now_ms, window_ms))
+        with self._lock:
+            cutoff = int(now_ms) - int(window_ms)
+            count = 0
+            for timestamp, _ in reversed(self._items):
+                if timestamp < cutoff:
+                    break
+                if timestamp <= int(now_ms):
+                    count += 1
+            return count
 
     def sum_since(self, now_ms: int, window_ms: int, selector: Callable[[T], float]) -> float:
-        return sum(selector(item) for item in self.items_since(now_ms, window_ms))
+        with self._lock:
+            cutoff = int(now_ms) - int(window_ms)
+            total = 0.0
+            for timestamp, item in reversed(self._items):
+                if timestamp < cutoff:
+                    break
+                if timestamp <= int(now_ms):
+                    total += selector(item)
+            return total
 
-    def _evict(self, now_ms: int) -> None:
+    def _evict(self, now_ms: int) -> list[T]:
         cutoff = int(now_ms) - self.max_window_ms
+        evicted: list[T] = []
         if not self._items:
-            return
-        self._items = deque((timestamp, item) for timestamp, item in self._items if timestamp >= cutoff)
+            return evicted
+        while self._items and self._items[0][0] < cutoff:
+            _, item = self._items.popleft()
+            evicted.append(item)
+        if self._items and self._items[-1][0] < cutoff:
+            kept: deque[tuple[int, T]] = deque()
+            for timestamp, item in self._items:
+                if timestamp >= cutoff:
+                    kept.append((timestamp, item))
+                else:
+                    evicted.append(item)
+            self._items = kept
+        return evicted

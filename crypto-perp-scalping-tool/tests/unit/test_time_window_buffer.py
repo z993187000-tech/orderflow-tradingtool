@@ -24,6 +24,13 @@ class TimeWindowBufferTests(unittest.TestCase):
         self.assertEqual(buffer.items(), ["recent"])
         self.assertEqual(buffer.latest_timestamp, 40_000)
 
+    def test_append_returns_items_evicted_from_rolling_window(self):
+        buffer = TimeWindowBuffer[str](max_window_ms=30_000)
+
+        self.assertEqual(buffer.append(1_000, "old"), [])
+        self.assertEqual(buffer.append(40_000, "recent"), ["old"])
+        self.assertEqual(buffer.items(), ["recent"])
+
     def test_sum_since_uses_selected_values(self):
         buffer = TimeWindowBuffer[TradeEvent](max_window_ms=120_000)
         buffer.append(1_000, TradeEvent(1_000, "BTCUSDT", 100, 5, False))
