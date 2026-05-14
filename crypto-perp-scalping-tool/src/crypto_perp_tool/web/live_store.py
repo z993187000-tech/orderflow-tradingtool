@@ -104,6 +104,11 @@ class LiveOrderflowStore:
         self._connection_message = "waiting for Binance stream"
         self._reconnect_count = 0
         self._lock = threading.Lock()
+        self._view_version = 0
+        self._view_cache: dict[str, Any] | None = None
+        self._view_cache_version = -1
+        self._view_cache_created = 0.0
+        self._view_cache_ttl_seconds = 1.0
 
         self._bin_size = self.settings.profile.btc_bin_size if self.symbol == "BTCUSDT" else self.settings.profile.eth_bin_size
         self._instrument = instrument_spec or default_instrument_spec(self.symbol)
@@ -169,11 +174,15 @@ class LiveOrderflowStore:
         self._last_reject_reasons: tuple[str, ...] = ()
         self._restored_state_info = self._restore_state()
 
+    def _invalidate_view_cache(self) -> None:
+        self._view_version += 1
+
     def add_trade(self, event: TradeEvent, received_at: int | None = None) -> None:
         if event.symbol.upper() != self.symbol:
             return
         received_at = int(time.time() * 1000) if received_at is None else int(received_at)
         with self._lock:
+            self._invalidate_view_cache()
             self._flash_crash_detector.add_price(event.timestamp, event.price)
             self._events.append(event)
             evicted_events = self._trade_window.append(event.timestamp, event)
@@ -222,34 +231,40 @@ class LiveOrderflowStore:
         if event.symbol.upper() != self.symbol:
             return
         with self._lock:
+            self._invalidate_view_cache()
             self._flash_crash_detector.add_liquidation(event.timestamp, event.quantity)
 
     def add_quote(self, event: QuoteEvent) -> None:
         if event.symbol.upper() != self.symbol:
             return
         with self._lock:
+            self._invalidate_view_cache()
             self._quote = event
 
     def add_mark(self, event: MarkPriceEvent) -> None:
         if event.symbol.upper() != self.symbol:
             return
         with self._lock:
+            self._invalidate_view_cache()
             self._mark = event
 
     def add_spot(self, event: SpotPriceEvent) -> None:
         if event.symbol.upper() != self.symbol:
             return
         with self._lock:
+            self._invalidate_view_cache()
             self._spot = event
 
     def add_kline(self, event: KlineEvent) -> None:
         if event.symbol.upper() != self.symbol:
             return
         with self._lock:
+            self._invalidate_view_cache()
             self._upsert_kline(event)
 
     def seed_klines(self, events: list[KlineEvent] | tuple[KlineEvent, ...]) -> None:
         with self._lock:
+            self._invalidate_view_cache()
             for event in events:
                 if event.symbol.upper() == self.symbol:
                     self._upsert_kline(event)
@@ -270,6 +285,7 @@ class LiveOrderflowStore:
 
     def set_connection_status(self, status: str, message: str) -> None:
         with self._lock:
+            self._invalidate_view_cache()
             previous = self._connection_status
             self._connection_status = status
             self._connection_message = message
@@ -288,6 +304,7 @@ class LiveOrderflowStore:
             )
             if not ok:
                 return {"resumed": False, "reason": "resume conditions not met"}
+            self._invalidate_view_cache()
             event = self._circuit_breaker.resume(actor=actor)
             self._write_journal("circuit_breaker_resumed", event)
             self._save_state()
@@ -1341,6 +1358,14 @@ class LiveOrderflowStore:
 
     def view(self) -> dict[str, Any]:
         with self._lock:
+            now_monotonic = time.monotonic()
+            if (
+                self._view_cache is not None
+                and self._view_cache_version == self._view_version
+                and now_monotonic - self._view_cache_created <= self._view_cache_ttl_seconds
+            ):
+                return self._view_cache
+            view_version = self._view_version
             events = list(self._events)
             quote = self._quote
             mark = self._mark
@@ -1409,7 +1434,7 @@ class LiveOrderflowStore:
         exchange_lag_min_ms = self._min_recent_lag()
         stream_freshness_ms = self._stream_freshness_ms(last_received_at)
 
-        return {
+        payload = {
             "summary": {
                 "source": "binance",
                 "symbol": self.symbol,
@@ -1485,6 +1510,14 @@ class LiveOrderflowStore:
             "markers": visible_markers,
             "details": details,
         }
+
+        with self._lock:
+            if view_version == self._view_version:
+                self._view_cache = payload
+                self._view_cache_version = view_version
+                self._view_cache_created = time.monotonic()
+
+        return payload
 
     def _markers_for_display(self, markers: list[dict[str, Any]], display_timestamps: list[int]) -> list[dict[str, Any]]:
         if not display_timestamps:

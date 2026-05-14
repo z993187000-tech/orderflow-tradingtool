@@ -93,6 +93,7 @@ def main(argv: list[str] | None = None) -> int:
     serve_parser = web_sub.add_parser("serve")
     serve_parser.add_argument("--source", choices=("csv", "binance"), default="csv")
     serve_parser.add_argument("--symbol", default="BTCUSDT")
+    serve_parser.add_argument("--symbols", default=None, help="Comma-separated live symbols to run, e.g. BTCUSDT,ETHUSDT. Defaults to --symbol only.")
     serve_parser.add_argument("--csv", default="data/sample_trades.csv")
     serve_parser.add_argument("--host", default=None)
     serve_parser.add_argument("--port", type=int, default=8000)
@@ -291,6 +292,7 @@ def main(argv: list[str] | None = None) -> int:
             data_path=Path(args.csv),
             source=args.source,
             symbol=args.symbol,
+            symbols=args.symbols,
             paper_journal_path=Path(args.paper_journal),
             testing_mode=args.testing,
         )

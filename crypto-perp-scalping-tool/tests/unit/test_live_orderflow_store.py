@@ -245,6 +245,19 @@ class LiveOrderflowStoreTests(unittest.TestCase):
         self.assertEqual(len(view["delta_series"]), 120)
         self.assertEqual(view["summary"]["profile_trade_count"], 600)
 
+    def test_live_store_reuses_view_cache_until_new_trade_arrives(self):
+        store = LiveOrderflowStore(symbol="BTCUSDT", max_events=10)
+        store.add_trade(TradeEvent(1_000, "BTCUSDT", 100, 1, False), received_at=1_000)
+
+        view1 = store.view()
+        view2 = store.view()
+        store.add_trade(TradeEvent(2_000, "BTCUSDT", 101, 1, False), received_at=2_000)
+        view3 = store.view()
+
+        self.assertIs(view1, view2)
+        self.assertIsNot(view2, view3)
+        self.assertEqual(view3["summary"]["last_price"], 101)
+
     def test_live_store_vwap_uses_rolling_profile_window_after_eviction(self):
         store = LiveOrderflowStore(symbol="BTCUSDT", max_events=10)
         old = TradeEvent(1_000, "BTCUSDT", 100, 10, False)

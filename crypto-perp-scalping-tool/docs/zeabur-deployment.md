@@ -42,7 +42,8 @@ PAPER_JOURNAL=data/live-paper.jsonl
 ## 环境变量说明
 
 - `WEB_SOURCE`：`binance` 或 `csv`。Zeabur 默认建议 `binance`。
-- `SYMBOL`：默认 `BTCUSDT`，也可改成 `ETHUSDT`。
+- `SYMBOL`：默认 `BTCUSDT`，也可改成 `ETHUSDT`。Zeabur 默认只启动这个单一交易对以降低 CPU。
+- `SYMBOLS`：可选，逗号分隔的多交易对列表，例如 `BTCUSDT,ETHUSDT`。只有需要多币种并发观察时再设置。
 - `PORT`：Zeabur 通常会注入端口；Dockerfile 默认 `8080`。
 - `PASSWORD`：公网 Web Dashboard 的访问密码。浏览器弹出登录框时，用户名可填 `admin` 或任意值，密码填这里配置的值。
 - `PAPER_JOURNAL`：实时 paper 交易日志基础路径。服务会按 symbol 拆成 `data/live-paper-btcusdt.jsonl` 和 `data/live-paper-ethusdt.jsonl`。

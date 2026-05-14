@@ -34,7 +34,6 @@ const els = {
   sourceLabel: document.getElementById("sourceLabel"),
   tradeCount: document.getElementById("tradeCount"),
   priceCanvas: document.getElementById("priceCanvas"),
-  deltaCanvas: document.getElementById("deltaCanvas"),
   tape: document.getElementById("tapeBody"),
   detailPanel: document.getElementById("detailPanel"),
   detailTitle: document.getElementById("detailTitle"),
@@ -56,6 +55,8 @@ const colors = {
 const REFRESH_INTERVAL_MS = 2000;
 const LARGE_TAPE_MIN_QTY = 20;
 const PROFILE_OVERLAY_WIDTH = 96;
+const PRICE_MIN_VISIBLE_RATIO = 0.02;
+const PRICE_MIN_VISIBLE_MS = 1000;
 const modeLabels = {
   paper: "Paper / 模拟",
   live: "Live / 实盘"
@@ -71,6 +72,15 @@ let latestDashboard = null;
 let isLoading = false;
 let activeDetail = "signals";
 let activeRange = "24h";
+const priceView = {
+  minTs: null,
+  maxTs: null,
+  isCustom: false,
+  dragging: false,
+  dragStartX: 0,
+  dragStartMinTs: null,
+  dragStartMaxTs: null
+};
 
 async function loadDashboard() {
   if (isLoading) return;
@@ -85,8 +95,7 @@ async function loadDashboard() {
     const data = await response.json();
     latestDashboard = data;
     renderSummary(data.summary);
-    drawPrice(els.priceCanvas, data.trades, data.markers, data.profile_levels, data.klines);
-    drawDelta(els.deltaCanvas, data.delta_series);
+    renderPriceChart();
     const largeTapeTrades = data.trades
       .filter(trade => trade.quantity >= LARGE_TAPE_MIN_QTY)
       .slice(-12)
@@ -288,6 +297,17 @@ function recordRow(kind, record) {
   return `<tr><td>${formatTimestamp(record.timestamp)}</td><td>${record.side || "--"}</td><td class="${pnlClass}">${formatNumber(record.realized_pnl)}</td><td class="${pnlClass}">${formatSignedPercent(pct)}</td></tr>`;
 }
 
+function renderPriceChart() {
+  if (!latestDashboard) return;
+  drawPrice(
+    els.priceCanvas,
+    latestDashboard.trades,
+    latestDashboard.markers,
+    latestDashboard.profile_levels,
+    latestDashboard.klines
+  );
+}
+
 function drawPrice(canvas, trades, markers, profileLevels, klines) {
   const ctx = setupCanvas(canvas);
   const safeTrades = Array.isArray(trades) ? trades : [];
@@ -296,20 +316,21 @@ function drawPrice(canvas, trades, markers, profileLevels, klines) {
   if (!hasPriceData) return;
   const selectedProfileLevels = latestProfileLevels(profileLevels);
   const chartRight = canvas.width;
+  const fullRange = priceDataTimeRange(safeTrades, safeKlines);
+  if (!fullRange) return;
+  const { minTs, maxTs } = visibleTimeRange(fullRange);
+  const visibleTrades = visibleItemsForTimeRange(safeTrades, minTs, maxTs);
+  const visibleKlines = visibleItemsForTimeRange(safeKlines, minTs, maxTs);
 
   const profilePrices = selectedProfileLevels.map(l => l.price).filter(p => Number.isFinite(Number(p)));
-  let prices, timestamps, minTs, maxTs;
+  let prices;
 
   if (safeKlines.length) {
-    prices = safeKlines.flatMap(k => [k.high, k.low]).concat(profilePrices);
-    timestamps = safeKlines.map(k => k.timestamp);
-    minTs = timestamps[0];
-    maxTs = timestamps[timestamps.length - 1];
+    const priceKlines = visibleKlines.length ? visibleKlines : safeKlines;
+    prices = priceKlines.flatMap(k => [k.high, k.low]).concat(profilePrices);
   } else {
-    prices = safeTrades.map(t => t.price).concat(profilePrices);
-    timestamps = safeTrades.map(t => t.timestamp);
-    minTs = timestamps[0];
-    maxTs = timestamps[timestamps.length - 1];
+    const priceTrades = visibleTrades.length ? visibleTrades : safeTrades;
+    prices = priceTrades.map(t => t.price).concat(profilePrices);
   }
 
   const scale = makeTimeScale(prices, minTs, maxTs, chartRight, canvas.height, 28, 50);
@@ -321,12 +342,12 @@ function drawPrice(canvas, trades, markers, profileLevels, klines) {
   drawVolumeProfileOverlay(ctx, canvas, scale, selectedProfileLevels);
 
   if (safeKlines.length) {
-    drawKlines(ctx, safeKlines, scale, chartRight);
+    drawKlines(ctx, visibleKlines, scale, chartRight);
   } else {
     ctx.strokeStyle = colors.price;
     ctx.lineWidth = 2;
     ctx.beginPath();
-    safeTrades.forEach((trade, index) => {
+    visibleTrades.forEach((trade, index) => {
       const x = scale.x(trade.timestamp);
       const y = scale.y(trade.price);
       if (index === 0) ctx.moveTo(x, y);
@@ -336,7 +357,7 @@ function drawPrice(canvas, trades, markers, profileLevels, klines) {
   }
 
   const placedLabels = [];
-  (markers || []).forEach(marker => {
+  (markers || []).filter(marker => marker.timestamp >= minTs && marker.timestamp <= maxTs).forEach(marker => {
     const markerTs = marker.timestamp || 0;
     const x = scale.x(markerTs);
     const y = scale.y(Number(marker.price));
@@ -356,6 +377,58 @@ function drawPrice(canvas, trades, markers, profileLevels, klines) {
     placedLabels.push(labelY);
     ctx.fillText(marker.label || marker.type, Math.min(x + 8, chartRight - 90), labelY);
   });
+}
+
+function priceDataTimeRange(trades, klines) {
+  const source = klines && klines.length ? klines : trades;
+  const timestamps = (source || []).map(item => Number(item.timestamp)).filter(Number.isFinite);
+  if (!timestamps.length) return null;
+  return { minTs: Math.min(...timestamps), maxTs: Math.max(...timestamps) };
+}
+
+function visibleTimeRange(fullRange) {
+  const fullSpan = Math.max(1, fullRange.maxTs - fullRange.minTs);
+  if (!priceView.isCustom || priceView.minTs === null || priceView.maxTs === null) {
+    priceView.minTs = fullRange.minTs;
+    priceView.maxTs = fullRange.maxTs;
+    priceView.isCustom = false;
+    return { minTs: fullRange.minTs, maxTs: fullRange.maxTs };
+  }
+
+  const minSpan = Math.min(fullSpan, Math.max(PRICE_MIN_VISIBLE_MS, fullSpan * PRICE_MIN_VISIBLE_RATIO));
+  const span = Math.min(fullSpan, Math.max(minSpan, priceView.maxTs - priceView.minTs));
+  let minTs = priceView.minTs;
+  let maxTs = minTs + span;
+  if (minTs < fullRange.minTs) {
+    minTs = fullRange.minTs;
+    maxTs = minTs + span;
+  }
+  if (maxTs > fullRange.maxTs) {
+    maxTs = fullRange.maxTs;
+    minTs = maxTs - span;
+  }
+  priceView.minTs = minTs;
+  priceView.maxTs = maxTs;
+  priceView.isCustom = span < fullSpan;
+  return { minTs, maxTs };
+}
+
+function visibleItemsForTimeRange(items, minTs, maxTs) {
+  let before = null;
+  let after = null;
+  const visible = [];
+  for (const item of items || []) {
+    const ts = Number(item.timestamp);
+    if (!Number.isFinite(ts)) continue;
+    if (ts < minTs) {
+      before = item;
+    } else if (ts > maxTs) {
+      if (!after) after = item;
+    } else {
+      visible.push(item);
+    }
+  }
+  return [before, ...visible, after].filter(Boolean);
 }
 
 function drawKlines(ctx, klines, scale, chartRight) {
@@ -460,36 +533,6 @@ function drawAggressionBubble(ctx, marker, x, y, canvas) {
   ctx.restore();
   ctx.fillStyle = colors.text;
   ctx.fillText(marker.label || "aggression_bubble", Math.min(x + radius + 6, canvas.width - 150), Math.max(y - radius, 14));
-}
-
-function drawDelta(canvas, series) {
-  const ctx = setupCanvas(canvas);
-  if (!series.length) return;
-  const values = series.map(point => point.cumulative_delta);
-  const timestamps = series.map(point => point.timestamp);
-  const minTs = timestamps[0];
-  const maxTs = timestamps[timestamps.length - 1];
-  const scale = makeTimeScale(values, minTs, maxTs, canvas.width, canvas.height, 22, 50);
-  drawGrid(ctx, canvas);
-  drawYAxis(ctx, canvas, scale, values);
-  const zeroY = scale.y(0);
-  ctx.strokeStyle = colors.grid;
-  ctx.beginPath();
-  ctx.moveTo(50, zeroY);
-  ctx.lineTo(canvas.width, zeroY);
-  ctx.stroke();
-
-  ctx.strokeStyle = values[values.length - 1] >= 0 ? colors.buy : colors.sell;
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  series.forEach((point, index) => {
-    const x = scale.x(point.timestamp);
-    const y = scale.y(point.cumulative_delta);
-    if (index === 0) ctx.moveTo(x, y);
-    else ctx.lineTo(x, y);
-  });
-  ctx.stroke();
-  drawTimeAxis(ctx, canvas, scale, minTs, maxTs);
 }
 
 function drawVolumeProfileOverlay(ctx, canvas, scale, profileLevels) {
@@ -612,6 +655,103 @@ function drawYAxis(ctx, canvas, scale, values) {
   });
 }
 
+function bindPriceCanvasInteractions() {
+  const canvas = els.priceCanvas;
+  if (!canvas) return;
+  canvas.addEventListener("wheel", event => {
+    event.preventDefault();
+    zoomPriceView(event);
+  }, { passive: false });
+  canvas.addEventListener("mousedown", event => {
+    if (event.button !== 0) return;
+    const range = currentVisiblePriceRange();
+    if (!range) return;
+    priceView.dragging = true;
+    priceView.dragStartX = event.clientX;
+    priceView.dragStartMinTs = range.minTs;
+    priceView.dragStartMaxTs = range.maxTs;
+    canvas.classList.add("is-dragging");
+  });
+  canvas.addEventListener("dblclick", event => {
+    event.preventDefault();
+    resetPriceView();
+  });
+  window.addEventListener("mousemove", event => {
+    if (!priceView.dragging) return;
+    const span = priceView.dragStartMaxTs - priceView.dragStartMinTs;
+    const deltaMs = -((event.clientX - priceView.dragStartX) / pricePlotWidth(canvas)) * span;
+    panPriceView(deltaMs, {
+      minTs: priceView.dragStartMinTs,
+      maxTs: priceView.dragStartMaxTs
+    });
+  });
+  window.addEventListener("mouseup", endPriceDrag);
+}
+
+function currentFullPriceRange() {
+  if (!latestDashboard) return null;
+  return priceDataTimeRange(latestDashboard.trades || [], latestDashboard.klines || []);
+}
+
+function currentVisiblePriceRange() {
+  const fullRange = currentFullPriceRange();
+  return fullRange ? visibleTimeRange(fullRange) : null;
+}
+
+function zoomPriceView(event) {
+  const fullRange = currentFullPriceRange();
+  if (!fullRange) return;
+  const currentRange = visibleTimeRange(fullRange);
+  const fullSpan = Math.max(1, fullRange.maxTs - fullRange.minTs);
+  const currentSpan = Math.max(1, currentRange.maxTs - currentRange.minTs);
+  const zoomFactor = event.deltaY < 0 ? 0.8 : 1.25;
+  const minSpan = Math.min(fullSpan, Math.max(PRICE_MIN_VISIBLE_MS, fullSpan * PRICE_MIN_VISIBLE_RATIO));
+  const nextSpan = Math.min(fullSpan, Math.max(minSpan, currentSpan * zoomFactor));
+  const cursorRatio = priceCursorRatio(event, els.priceCanvas);
+  const cursorTs = currentRange.minTs + currentSpan * cursorRatio;
+  priceView.minTs = cursorTs - nextSpan * cursorRatio;
+  priceView.maxTs = priceView.minTs + nextSpan;
+  priceView.isCustom = nextSpan < fullSpan;
+  renderPriceChart();
+}
+
+function panPriceView(deltaMs, baseRange = null) {
+  const range = baseRange || currentVisiblePriceRange();
+  if (!range) return;
+  priceView.minTs = range.minTs + deltaMs;
+  priceView.maxTs = range.maxTs + deltaMs;
+  priceView.isCustom = true;
+  renderPriceChart();
+}
+
+function resetPriceView(redraw = true) {
+  priceView.minTs = null;
+  priceView.maxTs = null;
+  priceView.isCustom = false;
+  if (redraw) renderPriceChart();
+}
+
+function endPriceDrag() {
+  if (!priceView.dragging) return;
+  priceView.dragging = false;
+  els.priceCanvas.classList.remove("is-dragging");
+}
+
+function priceCursorRatio(event, canvas) {
+  const rect = canvas.getBoundingClientRect();
+  const x = event.clientX - rect.left;
+  return clamp((x - 50) / pricePlotWidth(canvas), 0, 1);
+}
+
+function pricePlotWidth(canvas) {
+  const rect = canvas.getBoundingClientRect();
+  return Math.max(1, rect.width - 100);
+}
+
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+
 function splitLabel(breakdown, key) {
   return `模拟 ${formatNumber(breakdown.paper[key])} / 实盘 ${formatNumber(breakdown.live[key])}`;
 }
@@ -678,7 +818,10 @@ function formatSignedPercent(value) {
 }
 
 els.refresh.addEventListener("click", loadDashboard);
-els.symbol.addEventListener("change", loadDashboard);
+els.symbol.addEventListener("change", () => {
+  resetPriceView(false);
+  loadDashboard();
+});
 els.detailClose.addEventListener("click", () => {
   els.detailPanel.classList.add("is-hidden");
 });
@@ -722,5 +865,6 @@ async function resumeCircuit() {
 
 els.circuitResume.addEventListener("click", resumeCircuit);
 window.addEventListener("resize", loadDashboard);
+bindPriceCanvasInteractions();
 loadDashboard();
 setInterval(loadDashboard, REFRESH_INTERVAL_MS);
