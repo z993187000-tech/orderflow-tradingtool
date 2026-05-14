@@ -84,6 +84,19 @@ class LiveOrderflowStore:
         self._profile_window_ms = self.settings.profile.rolling_window_minutes * 60 * 1000
         self._events: deque[TradeEvent] = deque(maxlen=max_events)
         self._trade_window = TimeWindowBuffer[TradeEvent](max_window_ms=self._profile_window_ms)
+        self._profile_quantity = 0.0
+        self._profile_notional = 0.0
+        self._indicator_windows: dict[int, deque[TradeEvent]] = {
+            15_000: deque(),
+            30_000: deque(),
+            60_000: deque(),
+        }
+        self._indicator_delta_sums: dict[int, float] = {
+            15_000: 0.0,
+            30_000: 0.0,
+            60_000: 0.0,
+        }
+        self._volume_30s_sum = 0.0
         self._quote: QuoteEvent | None = None
         self._mark: MarkPriceEvent | None = None
         self._spot: SpotPriceEvent | None = None
@@ -163,7 +176,15 @@ class LiveOrderflowStore:
         with self._lock:
             self._flash_crash_detector.add_price(event.timestamp, event.price)
             self._events.append(event)
-            self._trade_window.append(event.timestamp, event)
+            evicted_events = self._trade_window.append(event.timestamp, event)
+            self._profile_quantity += event.quantity
+            self._profile_notional += event.price * event.quantity
+            for evicted in evicted_events:
+                self._profile_quantity -= evicted.quantity
+                self._profile_notional -= evicted.price * evicted.quantity
+            if self._profile_quantity < 0:
+                self._profile_quantity = 0.0
+                self._profile_notional = 0.0
             self._last_event_time = event.timestamp
             self._last_received_at = received_at
             self._recent_lags.append(max(0, self._last_received_at - self._last_event_time))
@@ -171,7 +192,7 @@ class LiveOrderflowStore:
             self._atr_1m.update(event)
             self._atr_3m.update(event)
             self._record_aggression_bubble(event)
-            self._refresh_indicators(event.timestamp)
+            self._refresh_indicators(event)
             filled_pending_entry = self._try_fill_pending_entry(event)
             if not filled_pending_entry:
                 skip_close = self._manage_position(event)
@@ -272,12 +293,27 @@ class LiveOrderflowStore:
             self._save_state()
             return {"resumed": True, "state": self._circuit_breaker.state}
 
-    def _refresh_indicators(self, timestamp: int) -> None:
-        self._last_delta_15s = self._trade_window.sum_since(timestamp, 15_000, lambda event: event.delta)
-        self._last_delta_30s = self._trade_window.sum_since(timestamp, 30_000, lambda event: event.delta)
-        self._last_delta_60s = self._trade_window.sum_since(timestamp, 60_000, lambda event: event.delta)
-        self._last_volume_30s = self._trade_window.sum_since(timestamp, 30_000, lambda event: abs(event.delta))
-        self._last_vwap = self._vwap(timestamp, self._profile_window_ms)
+    def _refresh_indicators(self, event: TradeEvent) -> None:
+        for window_ms in self._indicator_windows:
+            self._update_indicator_window(window_ms, event)
+        self._last_delta_15s = self._indicator_delta_sums[15_000]
+        self._last_delta_30s = self._indicator_delta_sums[30_000]
+        self._last_delta_60s = self._indicator_delta_sums[60_000]
+        self._last_volume_30s = self._volume_30s_sum
+        self._last_vwap = self._profile_notional / self._profile_quantity if self._profile_quantity > 0 else 0.0
+
+    def _update_indicator_window(self, window_ms: int, event: TradeEvent) -> None:
+        window = self._indicator_windows[window_ms]
+        window.append(event)
+        self._indicator_delta_sums[window_ms] += event.delta
+        if window_ms == 30_000:
+            self._volume_30s_sum += abs(event.delta)
+        cutoff = event.timestamp - window_ms
+        while window and window[0].timestamp < cutoff:
+            evicted = window.popleft()
+            self._indicator_delta_sums[window_ms] -= evicted.delta
+            if window_ms == 30_000:
+                self._volume_30s_sum -= abs(evicted.delta)
 
     def _vwap(self, timestamp: int, window_ms: int) -> float:
         events = self._trade_window.items_since(timestamp, window_ms)
@@ -1323,11 +1359,9 @@ class LiveOrderflowStore:
         cumulative_delta = 0.0
         trades: list[dict[str, Any]] = []
         delta_series: list[dict[str, Any]] = []
-        eight_hours_ms = 8 * 60 * 60 * 1000
         last_event_time = events[-1].timestamp if events else 0
-        time_window_count = sum(1 for e in events if last_event_time - e.timestamp <= eight_hours_ms) if last_event_time else 0
-        effective_display = max(self.display_events, time_window_count)
-        display_events = events[-effective_display:]
+        display_limit = max(1, self.display_events)
+        display_events = events[-display_limit:]
 
         for index, event in enumerate(display_events):
             cumulative_delta += event.delta

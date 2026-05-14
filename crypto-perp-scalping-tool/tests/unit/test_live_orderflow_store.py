@@ -233,6 +233,30 @@ class LiveOrderflowStoreTests(unittest.TestCase):
         self.assertEqual(poc["price"], 100)
         self.assertEqual(view["summary"]["profile_trade_count"], 600)
 
+    def test_live_store_caps_rendered_trades_to_display_window(self):
+        store = LiveOrderflowStore(symbol="BTCUSDT", max_events=1000, display_events=120)
+
+        for index in range(600):
+            store.add_trade(TradeEvent(1_000 + index * 100, "BTCUSDT", 100 + index, 1, False), received_at=1_000 + index * 100)
+
+        view = store.view()
+
+        self.assertEqual(len(view["trades"]), 120)
+        self.assertEqual(len(view["delta_series"]), 120)
+        self.assertEqual(view["summary"]["profile_trade_count"], 600)
+
+    def test_live_store_vwap_uses_rolling_profile_window_after_eviction(self):
+        store = LiveOrderflowStore(symbol="BTCUSDT", max_events=10)
+        old = TradeEvent(1_000, "BTCUSDT", 100, 10, False)
+        recent = TradeEvent(5 * 60 * 60 * 1000, "BTCUSDT", 200, 1, True)
+
+        store.add_trade(old, received_at=old.timestamp)
+        store.add_trade(recent, received_at=recent.timestamp)
+        view = store.view()
+
+        self.assertEqual(view["summary"]["profile_trade_count"], 1)
+        self.assertEqual(view["summary"]["vwap"], 200)
+
     def test_live_store_runs_signal_engine_and_produces_signals(self):
         store = LiveOrderflowStore(symbol="BTCUSDT", max_events=600, enable_signals=True)
         store.add_quote(QuoteEvent(1000, "BTCUSDT", 99, 101))
