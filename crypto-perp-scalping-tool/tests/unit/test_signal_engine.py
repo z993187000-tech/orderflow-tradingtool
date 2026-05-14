@@ -16,7 +16,8 @@ def _snapshot(last_price=101.0, delta_30s=25.0, volume_30s=100.0, spread_bps=1.9
               profile_levels=None, event_time=None, local_time=None, symbol="BTCUSDT",
               cumulative_delta=0.0, aggression_bubble_side=None,
               aggression_bubble_quantity=0.0, aggression_bubble_price=None,
-              aggression_bubble_tier=None, atr_1m_14=2.0, atr_3m_14=2.0):
+              aggression_bubble_tier=None, atr_1m_14=2.0, atr_3m_14=2.0,
+              exchange_event_time=None):
     now = int(time.time() * 1000)
     if profile_levels is None:
         profile_levels = (
@@ -36,6 +37,7 @@ def _snapshot(last_price=101.0, delta_30s=25.0, volume_30s=100.0, spread_bps=1.9
         aggression_bubble_quantity=aggression_bubble_quantity,
         aggression_bubble_price=aggression_bubble_price,
         aggression_bubble_tier=aggression_bubble_tier,
+        exchange_event_time=exchange_event_time,
     )
 
 
@@ -65,8 +67,17 @@ class SignalEngineTests(unittest.TestCase):
 
     def test_returns_none_when_data_is_stale(self):
         now = int(time.time() * 1000)
-        snap = _snapshot(event_time=now - 3000, local_time=now)
+        snap = _snapshot(event_time=now, local_time=now, exchange_event_time=now + 3000)
         self.assertIsNone(self.engine.evaluate(snap))
+
+    def test_ignores_wall_clock_skew_when_exchange_event_lag_is_fresh(self):
+        now = int(time.time() * 1000)
+        snap = _snapshot(event_time=now, local_time=now + 125_000, exchange_event_time=now + 250)
+
+        signal = self.engine.evaluate(snap)
+
+        self.assertIsNotNone(signal)
+        self.assertNotIn("data_stale", self.engine.last_reject_reasons)
 
     # --- Spread forbidden ---
 

@@ -40,6 +40,10 @@ class TelegramCommandHandler:
             return self._format_positions()
         if command == "/circuit":
             return self._format_circuit()
+        if command == "/set":
+            return self._handle_set(text)
+        if command == "/config":
+            return self._format_config()
         return "unknown command"
 
     def _format_positions(self) -> str:
@@ -62,6 +66,37 @@ class TelegramCommandHandler:
             f"Entry: {pos.get('entry_price',0):.2f}  Stop: {pos.get('stop_price',0):.2f}  Target: {pos.get('target_price',0):.2f}\n"
             f"Qty: {pos.get('quantity',0)}  BE shifted: {pos.get('break_even_shifted',False)}  Absorb: {pos.get('absorption_reduced',False)}"
         )
+
+    def _handle_set(self, text: str) -> str:
+        parts = text.strip().split()
+        if len(parts) < 3:
+            return "usage: /set <key> <value>\nkeys: risk_per_trade, daily_loss_limit, max_consecutive_losses, max_leverage, max_symbol_notional, equity, cooldown_ms, flash_atr_mult, flash_pct"
+        key = parts[1]
+        value = parts[2]
+        return self.service.update_setting(key, value)
+
+    def _format_config(self) -> str:
+        risk = self.service.risk()
+        lines = ["Risk settings:"]
+        lines.append(f"  risk_per_trade={risk.get('risk_per_trade','?')}")
+        lines.append(f"  daily_loss_limit={risk.get('daily_loss_limit','?')}")
+        lines.append(f"  max_consecutive_losses={risk.get('max_consecutive_losses','?')}")
+        lines.append(f"  max_leverage={risk.get('max_leverage','?')}")
+        lines.append(f"  max_symbol_notional={risk.get('max_symbol_notional_equity_multiple','?')}")
+        if self._store is not None:
+            store_lines = ["Store settings:"]
+            store_lines.append(f"  equity={getattr(self._store, 'equity', '?')}")
+            cb = getattr(self._store, '_circuit_breaker', None)
+            if cb is not None:
+                store_lines.append(f"  cooldown_ms={cb.hard_cooldown_ms}")
+            fcd = getattr(self._store, '_flash_crash_detector', None)
+            if fcd is not None:
+                store_lines.append(f"  flash_atr_mult={fcd.atr_multiplier}")
+                store_lines.append(f"  flash_pct={fcd.pct_threshold}")
+            if len(store_lines) > 1:
+                lines.append("")
+                lines.extend(store_lines)
+        return "\n".join(lines)
 
     def _format_circuit(self) -> str:
         if self._store is None:

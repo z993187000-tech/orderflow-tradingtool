@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
+from crypto_perp_tool.market_data.latency import compute_exchange_lag_ms
+
 
 class ProfileLevelType(StrEnum):
     POC = "POC"
@@ -143,6 +145,15 @@ class MarketSnapshot:
     aggression_bubble_quantity: float = 0.0
     aggression_bubble_price: float | None = None
     aggression_bubble_tier: str | None = None
+    exchange_event_time: int | None = None
+
+    @property
+    def exchange_lag_ms(self) -> int:
+        return compute_exchange_lag_ms(
+            event_time=self.event_time,
+            exchange_event_time=self.exchange_event_time,
+            received_at=self.local_time,
+        )
 
 
 @dataclass(frozen=True)

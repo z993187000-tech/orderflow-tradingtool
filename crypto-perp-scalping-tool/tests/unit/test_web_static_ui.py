@@ -134,6 +134,16 @@ class WebStaticUiTests(unittest.TestCase):
         self.assertIn("safeKlines.length", js)
         self.assertNotIn("if (!trades.length) return;", js)
 
+    def test_price_chart_time_range_uses_live_trades_and_klines(self):
+        js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn("const points = []", js)
+        self.assertIn("for (const trade of trades || [])", js)
+        self.assertIn("for (const kline of klines || [])", js)
+        self.assertIn("visibleKlinesForTimeRange", js)
+        self.assertNotIn("const source = klines && klines.length ? klines : trades;", js)
+        self.assertNotIn("if (candleCount < 2) return;", js)
+
     def test_price_chart_supports_mouse_zoom_and_drag(self):
         js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
         css = (STATIC_DIR / "app.css").read_text(encoding="utf-8")

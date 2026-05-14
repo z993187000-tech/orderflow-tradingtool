@@ -93,7 +93,7 @@ class SignalEngine:
     ) -> list[str]:
         reasons: list[str] = []
 
-        if snapshot.local_time - snapshot.event_time > self.max_data_lag_ms:
+        if snapshot.exchange_lag_ms > self.max_data_lag_ms:
             reasons.append("data_stale")
 
         if windows is not None and windows.spread_5min:

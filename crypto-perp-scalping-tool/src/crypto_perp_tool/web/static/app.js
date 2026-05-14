@@ -320,7 +320,7 @@ function drawPrice(canvas, trades, markers, profileLevels, klines) {
   if (!fullRange) return;
   const { minTs, maxTs } = visibleTimeRange(fullRange);
   const visibleTrades = visibleItemsForTimeRange(safeTrades, minTs, maxTs);
-  const visibleKlines = visibleItemsForTimeRange(safeKlines, minTs, maxTs);
+  const visibleKlines = visibleKlinesForTimeRange(safeKlines, minTs, maxTs);
 
   const profilePrices = selectedProfileLevels.map(l => l.price).filter(p => Number.isFinite(Number(p)));
   let prices;
@@ -380,10 +380,19 @@ function drawPrice(canvas, trades, markers, profileLevels, klines) {
 }
 
 function priceDataTimeRange(trades, klines) {
-  const source = klines && klines.length ? klines : trades;
-  const timestamps = (source || []).map(item => Number(item.timestamp)).filter(Number.isFinite);
-  if (!timestamps.length) return null;
-  return { minTs: Math.min(...timestamps), maxTs: Math.max(...timestamps) };
+  const points = [];
+  for (const trade of trades || []) {
+    const ts = Number(trade.timestamp);
+    if (Number.isFinite(ts)) points.push(ts);
+  }
+  for (const kline of klines || []) {
+    const start = Number(kline.timestamp);
+    if (Number.isFinite(start)) points.push(start);
+    const close = Number(kline.close_time);
+    if (kline.is_closed && Number.isFinite(close)) points.push(close);
+  }
+  if (!points.length) return null;
+  return { minTs: Math.min(...points), maxTs: Math.max(...points) };
 }
 
 function visibleTimeRange(fullRange) {
@@ -431,9 +440,31 @@ function visibleItemsForTimeRange(items, minTs, maxTs) {
   return [before, ...visible, after].filter(Boolean);
 }
 
+function visibleKlinesForTimeRange(klines, minTs, maxTs) {
+  let before = null;
+  let after = null;
+  const visible = [];
+  for (const kline of klines || []) {
+    const start = Number(kline.timestamp);
+    const close = Number(kline.close_time);
+    if (!Number.isFinite(start)) continue;
+    const end = Number.isFinite(close) ? close : start;
+    const kMin = Math.min(start, end);
+    const kMax = Math.max(start, end);
+    if (kMax < minTs) {
+      before = kline;
+    } else if (kMin > maxTs) {
+      if (!after) after = kline;
+    } else {
+      visible.push(kline);
+    }
+  }
+  return [before, ...visible, after].filter(Boolean);
+}
+
 function drawKlines(ctx, klines, scale, chartRight) {
   const candleCount = klines.length;
-  if (candleCount < 2) return;
+  if (!candleCount) return;
   const slotWidth = (chartRight - 50) / candleCount;
   const candleWidth = Math.max(1, Math.min(slotWidth * 0.7, 12));
 
