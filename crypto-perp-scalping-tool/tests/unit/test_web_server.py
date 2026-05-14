@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 from crypto_perp_tool.market_data import KlineEvent
-from crypto_perp_tool.web.server import create_app_handler, paper_journal_path_for_symbol, seed_historical_klines
+from crypto_perp_tool.web.server import active_live_symbols, create_app_handler, paper_journal_path_for_symbol, seed_historical_klines
 from crypto_perp_tool.web.live_store import LiveOrderflowStore
 
 
@@ -61,6 +61,14 @@ class WebServerTests(unittest.TestCase):
         self.assertEqual(btc_path.name, "live-paper-btcusdt.jsonl")
         self.assertEqual(eth_path.name, "live-paper-ethusdt.jsonl")
         self.assertNotEqual(btc_path, eth_path)
+
+    def test_active_live_symbols_defaults_to_requested_symbol_only(self):
+        self.assertEqual(active_live_symbols("BTCUSDT"), ("BTCUSDT",))
+
+    def test_active_live_symbols_can_enable_multiple_symbols_explicitly(self):
+        symbols = active_live_symbols("BTCUSDT", "ethusdt, BTCUSDT, ethusdt")
+
+        self.assertEqual(symbols, ("BTCUSDT", "ETHUSDT"))
 
     def test_seed_historical_klines_loads_recent_8h_5m_history(self):
         class FakeKlineClient:

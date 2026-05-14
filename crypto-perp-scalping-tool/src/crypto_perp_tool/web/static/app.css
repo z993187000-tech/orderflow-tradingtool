@@ -257,18 +257,12 @@ button {
 .workspace {
   display: grid;
   grid-template-columns: 1fr;
-  grid-template-areas:
-    "price"
-    "delta";
+  grid-template-areas: "price";
   margin-bottom: 16px;
 }
 
 .chart-panel:first-child {
   grid-area: price;
-}
-
-.chart-panel:nth-child(2) {
-  grid-area: delta;
 }
 
 .panel {
@@ -292,10 +286,12 @@ canvas {
 
 #priceCanvas {
   height: clamp(260px, 50vh, 520px);
+  cursor: grab;
+  touch-action: none;
 }
 
-#deltaCanvas {
-  height: clamp(140px, 24vh, 220px);
+#priceCanvas.is-dragging {
+  cursor: grabbing;
 }
 
 .tape-panel {
@@ -369,17 +365,11 @@ td:nth-child(2) {
 
   .workspace {
     grid-template-columns: 1fr;
-    grid-template-areas:
-      "price"
-      "delta";
+    grid-template-areas: "price";
   }
 
   #priceCanvas {
     height: 240px;
-  }
-
-  #deltaCanvas {
-    height: 160px;
   }
 }
 

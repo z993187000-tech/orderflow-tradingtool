@@ -173,19 +173,37 @@ def seed_historical_klines(
     return len(klines)
 
 
+def active_live_symbols(primary_symbol: str, symbols: str | tuple[str, ...] | list[str] | None = None) -> tuple[str, ...]:
+    primary = primary_symbol.upper()
+    raw_symbols: list[str] = []
+    if symbols is None:
+        raw_symbols = [primary]
+    elif isinstance(symbols, str):
+        raw_symbols = [item.strip().upper() for item in symbols.split(",") if item.strip()]
+    else:
+        raw_symbols = [str(item).strip().upper() for item in symbols if str(item).strip()]
+
+    ordered: list[str] = []
+    for item in [primary, *raw_symbols]:
+        if item and item not in ordered:
+            ordered.append(item)
+    return tuple(ordered)
+
+
 def serve_dashboard(
     host: str,
     port: int,
     data_path: Path | str,
     source: str = "csv",
     symbol: str = "BTCUSDT",
+    symbols: str | tuple[str, ...] | list[str] | None = None,
     paper_journal_path: Path | str | None = None,
     testing_mode: bool = False,
 ) -> ThreadingHTTPServer:
     live_stores = None
     clients = []
     if source == "binance":
-        symbols = tuple(dict.fromkeys([symbol.upper(), "BTCUSDT", "ETHUSDT"]))
+        symbols = active_live_symbols(symbol, symbols)
         live_stores = {}
         base_journal_path = Path(paper_journal_path) if paper_journal_path is not None else None
         for live_symbol in symbols:

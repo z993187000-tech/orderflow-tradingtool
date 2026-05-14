@@ -54,6 +54,17 @@ class WebStaticUiTests(unittest.TestCase):
         self.assertIn("clamp(", css)
         self.assertIn("rect.height", js)
 
+    def test_dashboard_removes_cumulative_delta_chart(self):
+        html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+        js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+        css = (STATIC_DIR / "app.css").read_text(encoding="utf-8")
+
+        self.assertNotIn('id="deltaCanvas"', html)
+        self.assertNotIn("Cumulative Delta", html)
+        self.assertNotIn("deltaCanvas", js)
+        self.assertNotIn("drawDelta", js)
+        self.assertNotIn("#deltaCanvas", css)
+
     def test_summary_shows_perp_trade_and_reference_price_context(self):
         html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
         js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
@@ -122,6 +133,21 @@ class WebStaticUiTests(unittest.TestCase):
         self.assertIn("hasPriceData", js)
         self.assertIn("safeKlines.length", js)
         self.assertNotIn("if (!trades.length) return;", js)
+
+    def test_price_chart_supports_mouse_zoom_and_drag(self):
+        js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+        css = (STATIC_DIR / "app.css").read_text(encoding="utf-8")
+
+        self.assertIn("priceView", js)
+        self.assertIn("bindPriceCanvasInteractions", js)
+        self.assertIn('addEventListener("wheel"', js)
+        self.assertIn('addEventListener("mousedown"', js)
+        self.assertIn('addEventListener("dblclick"', js)
+        self.assertIn("zoomPriceView", js)
+        self.assertIn("panPriceView", js)
+        self.assertIn("resetPriceView", js)
+        self.assertIn("visibleTimeRange", js)
+        self.assertIn("cursor: grab", css)
 
     def test_dashboard_renders_strategy_explainability_panel(self):
         html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")

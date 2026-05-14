@@ -130,7 +130,7 @@ http://127.0.0.1:8000
 
 - Web 页面每 2 秒自动请求一次 `/api/orderflow`，并使用 `cache=no-store` 避免浏览器缓存旧价格。
 - 顶部 Perp Last / 永续最新成交价按 `Perp aggTrade -> bookTicker mid -> mark_price -> index_price` 的优先级显示，避免把现货价格误当作实盘永续成交价。
-- Live 模式默认同时启动 BTCUSDT 和 ETHUSDT 数据源，页面下拉框切换时会请求对应 symbol 的独立 live store。
+- Live 模式默认只启动 `--symbol` 指定的单个数据源，降低 Zeabur 等小实例的 CPU 和 WebSocket 开销；如需多币种，显式传 `--symbols BTCUSDT,ETHUSDT`，页面下拉框切换时会请求对应 symbol 的独立 live store。
 - Live 模式下图表只展示最近 500 笔成交，避免手机端卡顿；Volume Profile 使用最近最多 20,000 笔成交计算，避免 POC、VAH、VAL 被极短窗口压扁。
 - POC 显示成交量最大分桶的中心价；VAH/VAL 显示价值区的上沿/下沿边界价，不再直接显示分桶中心价。
 - 如果最新价仍明显落后，优先看 Connection / 连接状态和浏览器网络请求，确认 Binance WebSocket 是否仍为 `connected`。
