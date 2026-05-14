@@ -265,6 +265,7 @@ def serve_dashboard(
         if restore_info.get("paused"):
             service.paused = True
         bot_handler = TelegramCommandHandler(service=service, allowed_chat_ids=allowed_chat_ids, store=primary_store)
+        service.set_store(primary_store)
         poller = TelegramPoller(handler=bot_handler, journal=telegram_journal)
         poller.start()
 

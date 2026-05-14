@@ -1,5 +1,7 @@
 from dataclasses import dataclass
 
+from crypto_perp_tool.market_data.latency import compute_exchange_lag_ms
+
 
 @dataclass(frozen=True)
 class TradeEvent:
@@ -8,10 +10,15 @@ class TradeEvent:
     price: float
     quantity: float
     is_buyer_maker: bool
+    exchange_event_time: int | None = None
 
     @property
     def delta(self) -> float:
         return -self.quantity if self.is_buyer_maker else self.quantity
+
+    @property
+    def exchange_lag_ms(self) -> int:
+        return compute_exchange_lag_ms(event_time=self.timestamp, exchange_event_time=self.exchange_event_time)
 
 
 @dataclass(frozen=True)

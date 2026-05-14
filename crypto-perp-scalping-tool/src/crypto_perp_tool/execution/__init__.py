@@ -1,6 +1,7 @@
 """Execution engine and paper/live order adapters."""
 
-from .paper_engine import PaperExecutionConfig, PaperTradingEngine
+from .models import PaperExecutionConfig, PaperOpenPosition, PaperPendingEntry
+from .paper_engine import PaperTradingEngine
 from .reconciler import (
     PositionReconciler,
     ReconciledPosition,
@@ -10,6 +11,8 @@ from .reconciler import (
 
 __all__ = [
     "PaperExecutionConfig",
+    "PaperOpenPosition",
+    "PaperPendingEntry",
     "PaperTradingEngine",
     "PositionReconciler",
     "ReconciledPosition",

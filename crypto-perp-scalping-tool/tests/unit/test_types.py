@@ -1,6 +1,7 @@
-import unittest
 import time
-from crypto_perp_tool.types import HistoricalWindows, MarketDataHealth
+import unittest
+
+from crypto_perp_tool.types import HistoricalWindows, MarketDataHealth, MarketSnapshot
 
 
 class HistoricalWindowsTests(unittest.TestCase):
@@ -46,6 +47,51 @@ class MarketDataHealthTests(unittest.TestCase):
     def test_default_state_is_starting(self):
         health = MarketDataHealth()
         self.assertEqual(health.connection_status, "starting")
+
+
+class MarketSnapshotTests(unittest.TestCase):
+    def test_exchange_lag_uses_exchange_event_time_when_present(self):
+        snapshot = MarketSnapshot(
+            exchange="binance",
+            symbol="BTCUSDT",
+            event_time=1_000,
+            local_time=99_999,
+            exchange_event_time=1_250,
+            last_price=100,
+            bid_price=99,
+            ask_price=101,
+            spread_bps=200,
+            vwap=100,
+            atr_1m_14=1,
+            delta_15s=0,
+            delta_30s=0,
+            delta_60s=0,
+            volume_30s=0,
+            profile_levels=(),
+        )
+
+        self.assertEqual(snapshot.exchange_lag_ms, 250)
+
+    def test_exchange_lag_falls_back_to_local_time_when_exchange_time_missing(self):
+        snapshot = MarketSnapshot(
+            exchange="binance",
+            symbol="BTCUSDT",
+            event_time=1_000,
+            local_time=1_375,
+            last_price=100,
+            bid_price=99,
+            ask_price=101,
+            spread_bps=200,
+            vwap=100,
+            atr_1m_14=1,
+            delta_15s=0,
+            delta_30s=0,
+            delta_60s=0,
+            volume_30s=0,
+            profile_levels=(),
+        )
+
+        self.assertEqual(snapshot.exchange_lag_ms, 375)
 
 
 if __name__ == "__main__":

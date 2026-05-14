@@ -45,6 +45,7 @@ class BinanceMarketDataTests(unittest.TestCase):
         self.assertEqual(event.symbol, "BTCUSDT")
         self.assertEqual(event.price, 27123.40)
         self.assertEqual(event.quantity, 0.018)
+        self.assertEqual(getattr(event, "exchange_event_time", None), 1569514978020)
         self.assertTrue(event.is_buyer_maker)
         self.assertEqual(event.delta, -0.018)
 

@@ -68,6 +68,7 @@ class BinanceAggTradeParser:
             price=float(payload["p"]),
             quantity=float(payload["q"]),
             is_buyer_maker=bool(payload["m"]),
+            exchange_event_time=int(payload.get("E") or payload.get("T")),
         )
 
 

@@ -3,6 +3,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from crypto_perp_tool.market_data import KlineEvent, MarkPriceEvent, QuoteEvent, SpotPriceEvent, TradeEvent
 from crypto_perp_tool.market_data.binance import BinanceInstrumentSpec
@@ -49,7 +50,7 @@ class CapturingStaleSignalEngine:
 
     def evaluate(self, snapshot, **kwargs):
         self.last_snapshot = snapshot
-        if snapshot.local_time - snapshot.event_time > 2_000:
+        if snapshot.exchange_lag_ms > 2_000:
             self.last_reject_reasons = ("data_stale",)
         return None
 
@@ -69,6 +70,40 @@ class LiveOrderflowStoreTests(unittest.TestCase):
         self.assertEqual([kline["timestamp"] for kline in view["klines"]], [1_000, 301_000])
         self.assertEqual(view["klines"][-1]["high"], 116)
         self.assertFalse(view["klines"][-1]["is_closed"])
+
+    def test_live_store_builds_current_5m_kline_from_live_trades_when_stream_lags(self):
+        store = LiveOrderflowStore(symbol="BTCUSDT", max_events=10)
+
+        store.add_trade(TradeEvent(301_000, "BTCUSDT", 100.0, 1.0, False), received_at=301_010)
+        store.add_trade(TradeEvent(302_000, "BTCUSDT", 105.0, 2.0, False), received_at=302_010)
+        store.add_trade(TradeEvent(303_000, "BTCUSDT", 98.0, 3.0, True), received_at=303_010)
+
+        klines = store.view()["klines"]
+
+        self.assertEqual(len(klines), 1)
+        kline = klines[0]
+        self.assertEqual(kline["timestamp"], 300_000)
+        self.assertEqual(kline["close_time"], 599_999)
+        self.assertEqual(kline["open"], 100.0)
+        self.assertEqual(kline["high"], 105.0)
+        self.assertEqual(kline["low"], 98.0)
+        self.assertEqual(kline["close"], 98.0)
+        self.assertEqual(kline["volume"], 6.0)
+        self.assertEqual(kline["quote_volume"], 604.0)
+        self.assertEqual(kline["trade_count"], 3)
+        self.assertFalse(kline["is_closed"])
+
+    def test_live_store_updates_open_streamed_kline_from_trades_when_kline_messages_lag(self):
+        store = LiveOrderflowStore(symbol="BTCUSDT", max_events=10)
+        store.add_kline(KlineEvent(300_000, 599_999, "BTCUSDT", "5m", 100.0, 102.0, 99.0, 101.0, 10.0, 1_000.0, 5, False))
+
+        store.add_trade(TradeEvent(302_000, "BTCUSDT", 105.0, 2.0, False), received_at=302_010)
+
+        kline = store.view()["klines"][0]
+        self.assertEqual(kline["high"], 105.0)
+        self.assertEqual(kline["close"], 105.0)
+        self.assertEqual(kline["volume"], 10.0)
+        self.assertEqual(kline["trade_count"], 5)
 
     def test_live_store_keeps_only_recent_8h_5m_kline_history(self):
         store = LiveOrderflowStore(symbol="BTCUSDT", max_events=10)
@@ -351,8 +386,9 @@ class LiveOrderflowStoreTests(unittest.TestCase):
         store._signal_engine = engine
 
         for index in range(30):
-            event = TradeEvent(1_000 + index * 100, "BTCUSDT", 100 + index * 0.01, 1, False)
-            store.add_trade(event, received_at=event.timestamp + 3_000)
+            event_time = 1_000 + index * 100
+            event = TradeEvent(event_time, "BTCUSDT", 100 + index * 0.01, 1, False, exchange_event_time=event_time + 3_000)
+            store.add_trade(event, received_at=event.timestamp + 125_000)
 
         summary = store.view()["summary"]
 
@@ -363,13 +399,35 @@ class LiveOrderflowStoreTests(unittest.TestCase):
     def test_live_store_splits_exchange_lag_from_stream_freshness(self):
         store = LiveOrderflowStore(symbol="BTCUSDT", max_events=10)
         now = int(time.time() * 1000)
+        event = TradeEvent(now - 5_000, "BTCUSDT", 100, 1, False, exchange_event_time=now - 200)
 
-        store.add_trade(TradeEvent(now - 5_000, "BTCUSDT", 100, 1, False), received_at=now - 100)
+        store.add_trade(event, received_at=now - 100)
         summary = store.view()["summary"]
 
         self.assertGreaterEqual(summary["exchange_lag_ms"], 4_800)
         self.assertLess(summary["stream_freshness_ms"], 1_000)
         self.assertEqual(summary["data_lag_ms"], summary["exchange_lag_ms"])
+
+    def test_live_store_exchange_lag_uses_binance_event_time_not_wall_clock(self):
+        store = LiveOrderflowStore(symbol="BTCUSDT", max_events=10)
+        event = TradeEvent(1_000, "BTCUSDT", 100, 1, False, exchange_event_time=1_250)
+
+        store.add_trade(event, received_at=126_000)
+        summary = store.view()["summary"]
+
+        self.assertEqual(summary["exchange_lag_ms"], 250)
+        self.assertEqual(summary["data_lag_ms"], 250)
+
+    def test_stream_freshness_uses_monotonic_receive_clock(self):
+        store = LiveOrderflowStore(symbol="BTCUSDT", max_events=10)
+        event = TradeEvent(1_000, "BTCUSDT", 100, 1, False)
+
+        with mock.patch("crypto_perp_tool.web.live_store.time.monotonic", side_effect=[100.0, 100.75, 100.75, 100.75]):
+            with mock.patch("crypto_perp_tool.web.live_store.time.time", return_value=999_999.0):
+                store.add_trade(event, received_at=126_000)
+                summary = store.view()["summary"]
+
+        self.assertEqual(summary["stream_freshness_ms"], 750)
 
     def test_live_paper_journal_records_signal_fill_close_pnl_and_fee_fields(self):
         with tempfile.TemporaryDirectory() as tmp:
