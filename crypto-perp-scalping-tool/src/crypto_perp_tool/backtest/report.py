@@ -21,6 +21,7 @@ class BacktestReport:
     average_holding_time_ms: float
     average_slippage_bps: float
     by_setup: dict[str, dict[str, Any]] = field(default_factory=dict)
+    by_strategy_context: dict[str, dict[str, Any]] = field(default_factory=dict)
     data_quality: dict[str, str] = field(default_factory=dict)
     config_version: str = ""
 
@@ -60,6 +61,7 @@ class BacktestReporter:
             average_holding_time_ms=self._average_holding_time(closed),
             average_slippage_bps=self._average_slippage(orders, closed),
             by_setup=self._by_setup(closed, signals),
+            by_strategy_context=self._by_strategy_context(closed, signals),
             data_quality=self._data_quality(closed, orders, signals),
             config_version=self.config_version,
         )
@@ -133,6 +135,27 @@ class BacktestReporter:
                 "net_pnl": sum(pnls),
             }
         return output
+
+    def _by_strategy_context(self, closed: list[dict[str, Any]], signals: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        signal_keys = [self._strategy_context_key(item) for item in signals]
+        keys = set(signal_keys) | {self._strategy_context_key(item) for item in closed}
+        output: dict[str, dict[str, Any]] = {}
+        for key in keys:
+            key_closed = [item for item in closed if self._strategy_context_key(item) == key]
+            pnls = [float(item.get("net_realized_pnl", item.get("realized_pnl", 0.0))) for item in key_closed]
+            output[key] = {
+                "signals": signal_keys.count(key),
+                "trades": len(key_closed),
+                "wins": sum(1 for pnl in pnls if pnl > 0),
+                "net_pnl": sum(pnls),
+            }
+        return output
+
+    def _strategy_context_key(self, item: dict[str, Any]) -> str:
+        setup_model = str(item.get("setup_model") or item.get("setup") or "unknown")
+        market_state = str(item.get("market_state") or "unknown")
+        session = str(item.get("session") or item.get("entry_session") or "unknown")
+        return f"{setup_model}|{market_state}|{session}"
 
     def _data_quality(
         self,

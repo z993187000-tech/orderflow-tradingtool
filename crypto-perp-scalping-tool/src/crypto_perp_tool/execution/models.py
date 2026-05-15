@@ -28,6 +28,12 @@ class PaperOpenPosition:
     max_favorable_move: float = 0.0
     max_adverse_move: float = 0.0
     entry_order_type: str = "limit"
+    setup_model: str = ""
+    legacy_setup: str = ""
+    market_state: str = ""
+    bias: str = ""
+    target_source: str = ""
+    management_profile: str = ""
 
 
 @dataclass
@@ -58,3 +64,9 @@ class PaperExecutionConfig:
     min_stop_cost_mult: float = 1.0
     min_target_cost_mult: float = 2.0
     max_holding_ms: int = 900_000
+    squeeze_break_even_r: float = 1.25
+    failed_auction_break_even_r: float = 1.5
+    lvn_acceptance_break_even_r: float = 1.5
+    first_structure_reduce_ratio: float = 0.5
+    absorption_reduce_ratio: float = 0.5
+    no_followthrough_seconds: int = 45

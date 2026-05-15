@@ -76,6 +76,45 @@ class SignalSettings:
 
 
 @dataclass(frozen=True)
+class MarketStateSettings:
+    compression_bars: int = 5
+    compression_range_ratio: float = 0.65
+    absorption_delta_ratio: float = 2.0
+    absorption_max_displacement_atr: float = 0.25
+    failed_auction_window_seconds: int = 90
+    value_acceptance_close_bars: int = 2
+
+
+@dataclass(frozen=True)
+class ConfirmationSettings:
+    require_1m_close: bool = True
+    close_buffer_bps: float = 1.0
+    max_reclaim_seconds: int = 20
+    min_displacement_atr: float = 0.15
+    min_delta_ratio: float = 1.2
+    min_volume_ratio: float = 1.3
+
+
+@dataclass(frozen=True)
+class TradePlanSettings:
+    min_reward_risk: float = 1.2
+    fallback_reward_risk: float = 3.0
+    max_reward_risk: float = 6.0
+    structure_target_first: bool = True
+    atr_stop_mult: float = 0.35
+
+
+@dataclass(frozen=True)
+class ManagementSettings:
+    squeeze_break_even_r: float = 1.25
+    failed_auction_break_even_r: float = 1.5
+    lvn_acceptance_break_even_r: float = 1.5
+    first_structure_reduce_ratio: float = 0.5
+    absorption_reduce_ratio: float = 0.5
+    no_followthrough_seconds: int = 45
+
+
+@dataclass(frozen=True)
 class Settings:
     exchange: str
     mode: str
@@ -84,6 +123,10 @@ class Settings:
     execution: ExecutionSettings
     profile: ProfileSettings
     signals: SignalSettings
+    market_state: MarketStateSettings
+    confirmation: ConfirmationSettings
+    trade_plan: TradePlanSettings
+    management: ManagementSettings
     safety_warnings: tuple[str, ...] = ()
     config_version: str = ""
 
@@ -95,6 +138,10 @@ def _compute_config_version(settings: Settings) -> str:
         "execution": settings.execution,
         "profile": settings.profile,
         "signals": settings.signals,
+        "market_state": settings.market_state,
+        "confirmation": settings.confirmation,
+        "trade_plan": settings.trade_plan,
+        "management": settings.management,
     })
     canonical = json.dumps(payload, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(canonical.encode()).hexdigest()[:12]
@@ -109,6 +156,10 @@ def default_settings() -> Settings:
         execution=ExecutionSettings(),
         profile=ProfileSettings(),
         signals=SignalSettings(),
+        market_state=MarketStateSettings(),
+        confirmation=ConfirmationSettings(),
+        trade_plan=TradePlanSettings(),
+        management=ManagementSettings(),
     )
     return Settings(
         exchange=base.exchange,
@@ -118,6 +169,10 @@ def default_settings() -> Settings:
         execution=base.execution,
         profile=base.profile,
         signals=base.signals,
+        market_state=base.market_state,
+        confirmation=base.confirmation,
+        trade_plan=base.trade_plan,
+        management=base.management,
         config_version=_compute_config_version(base),
     )
 
@@ -145,6 +200,10 @@ def load_settings(overrides: dict[str, Any] | None = None) -> Settings:
         execution=base.execution,
         profile=base.profile,
         signals=base.signals,
+        market_state=base.market_state,
+        confirmation=base.confirmation,
+        trade_plan=base.trade_plan,
+        management=base.management,
         safety_warnings=tuple(warnings),
     )
     return Settings(
@@ -155,6 +214,10 @@ def load_settings(overrides: dict[str, Any] | None = None) -> Settings:
         execution=settings.execution,
         profile=settings.profile,
         signals=settings.signals,
+        market_state=settings.market_state,
+        confirmation=settings.confirmation,
+        trade_plan=settings.trade_plan,
+        management=settings.management,
         safety_warnings=settings.safety_warnings,
         config_version=_compute_config_version(settings),
     )

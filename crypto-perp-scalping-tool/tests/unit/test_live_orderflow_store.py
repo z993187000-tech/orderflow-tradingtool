@@ -140,6 +140,9 @@ class LiveOrderflowStoreTests(unittest.TestCase):
         self.assertEqual(view["summary"]["symbol"], "BTCUSDT")
         self.assertEqual(view["summary"]["trade_count"], 7)
         self.assertEqual(view["summary"]["last_price"], 96150)
+        self.assertIn("market_state", view["summary"])
+        self.assertIn("bias", view["summary"])
+        self.assertIn("last_reject_reasons", view["summary"])
         self.assertTrue(any(level["type"] == "LVN" for level in view["profile_levels"]))
         self.assertGreater(len(view["delta_series"]), 0)
 

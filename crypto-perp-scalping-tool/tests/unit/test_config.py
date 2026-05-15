@@ -25,6 +25,14 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(hasattr(settings.execution, "kline_stop_shift_reference_bars"))
         self.assertEqual(settings.execution.kline_stop_shift_consecutive_bars, 3)
         self.assertEqual(settings.execution.kline_stop_shift_reference_bars, 2)
+        self.assertEqual(settings.market_state.compression_bars, 5)
+        self.assertEqual(settings.market_state.absorption_delta_ratio, 2.0)
+        self.assertTrue(settings.confirmation.require_1m_close)
+        self.assertEqual(settings.confirmation.min_delta_ratio, 1.2)
+        self.assertEqual(settings.trade_plan.fallback_reward_risk, 3.0)
+        self.assertEqual(settings.trade_plan.max_reward_risk, 6.0)
+        self.assertEqual(settings.management.squeeze_break_even_r, 1.25)
+        self.assertEqual(settings.management.absorption_reduce_ratio, 0.5)
 
 
 if __name__ == "__main__":

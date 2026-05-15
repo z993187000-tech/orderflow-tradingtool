@@ -655,6 +655,7 @@ class LiveOrderflowStore:
         signal = self._signal_engine.evaluate(
             snapshot,
             windows=self._historical,
+            klines=tuple(kline for kline in self._klines if kline.interval == "1m" and kline.is_closed),
             health=health,
             circuit_tripped=self._circuit_breaker.state == "tripped",
             has_position=self._position is not None,
@@ -753,10 +754,24 @@ class LiveOrderflowStore:
             "target_r_multiple": signal.target_r_multiple,
             "confidence": signal.confidence,
             "reasons": list(signal.reasons),
+            "setup_model": signal.setup_model,
+            "legacy_setup": signal.legacy_setup,
+            "market_state": signal.market_state,
+            "bias": signal.bias,
+            "target_source": signal.target_source,
+            "management_profile": signal.management_profile,
         }
         self._details["paper"]["signals"].append(record)
         self._markers.append(
-            {"type": "signal", "timestamp": signal.created_at, "price": signal.entry_price, "label": signal.setup}
+            {
+                "type": "signal",
+                "timestamp": signal.created_at,
+                "price": signal.entry_price,
+                "label": signal.setup,
+                "setup_model": signal.setup_model,
+                "market_state": signal.market_state,
+                "bias": signal.bias,
+            }
         )
         self._write_journal("signal", {"signal": signal})
 
@@ -836,6 +851,12 @@ class LiveOrderflowStore:
             "symbol": signal.symbol,
             "side": signal.side,
             "setup": signal.setup,
+            "setup_model": signal.setup_model,
+            "legacy_setup": signal.legacy_setup,
+            "market_state": signal.market_state,
+            "bias": signal.bias,
+            "target_source": signal.target_source,
+            "management_profile": signal.management_profile,
             "quantity": fill["quantity"],
             "entry_price": fill["fill_price"],
             "signal_entry_price": signal.entry_price,
@@ -865,6 +886,13 @@ class LiveOrderflowStore:
             "timestamp": event.timestamp,
             "symbol": signal.symbol,
             "side": signal.side.value,
+            "setup": signal.setup,
+            "setup_model": signal.setup_model,
+            "legacy_setup": signal.legacy_setup,
+            "market_state": signal.market_state,
+            "bias": signal.bias,
+            "target_source": signal.target_source,
+            "management_profile": signal.management_profile,
             "quantity": fill["quantity"],
             "entry_price": fill["fill_price"],
             "signal_entry_price": signal.entry_price,
@@ -1065,6 +1093,12 @@ class LiveOrderflowStore:
             "symbol": position["symbol"],
             "side": position["side"].value,
             "setup": position.get("setup", "unknown"),
+            "setup_model": position.get("setup_model"),
+            "legacy_setup": position.get("legacy_setup"),
+            "market_state": position.get("market_state"),
+            "bias": position.get("bias"),
+            "target_source": position.get("target_source"),
+            "management_profile": position.get("management_profile"),
             "quantity": quantity,
             "remaining_quantity": position["quantity"],
             "entry_price": position["entry_price"],
@@ -1161,6 +1195,12 @@ class LiveOrderflowStore:
             "symbol": position["symbol"],
             "side": position["side"].value,
             "setup": position.get("setup", "unknown"),
+            "setup_model": position.get("setup_model"),
+            "legacy_setup": position.get("legacy_setup"),
+            "market_state": position.get("market_state"),
+            "bias": position.get("bias"),
+            "target_source": position.get("target_source"),
+            "management_profile": position.get("management_profile"),
             "quantity": position["quantity"],
             "entry_price": position["entry_price"],
             "signal_entry_price": position.get("signal_entry_price", position["entry_price"]),
@@ -1640,9 +1680,12 @@ class LiveOrderflowStore:
             last_signal_reasons = list(self._last_signal_reasons)
             last_reject_reasons = list(self._last_reject_reasons)
             last_bubble = to_jsonable(deepcopy(self._last_bubble))
+            signal_trace = deepcopy(getattr(self._signal_engine, "last_trace", None)) if self._signal_engine is not None else None
             klines = list(self._klines)
             last_received_at = self._last_received_at
 
+        market_state = signal_trace.market_state.state if signal_trace is not None else "unknown"
+        bias = signal_trace.bias.bias if signal_trace is not None else "neutral"
         cumulative_delta = 0.0
         trades: list[dict[str, Any]] = []
         delta_series: list[dict[str, Any]] = []
@@ -1731,8 +1774,11 @@ class LiveOrderflowStore:
                 "closed_positions": self._closed_positions,
                 "realized_pnl": self._realized_pnl,
                 "open_position": position,
+                "market_state": market_state,
+                "bias": bias,
                 "signal_reasons": last_signal_reasons,
                 "reject_reasons": last_reject_reasons,
+                "last_reject_reasons": last_reject_reasons,
                 "data_lag_ms": exchange_lag_ms,
                 "exchange_lag_ms": exchange_lag_ms,
                 "lag_min_ms": exchange_lag_min_ms,

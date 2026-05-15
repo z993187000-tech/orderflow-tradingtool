@@ -177,7 +177,7 @@ class PaperTradingEngine:
             return
 
         snapshot = self._snapshot(event, quote, received_at)
-        signal = self.signals.evaluate(snapshot)
+        signal = self.signals.evaluate(snapshot, klines=tuple(self._completed_1m_klines))
         if signal is None:
             reasons = tuple(getattr(self.signals, "last_reject_reasons", ()) or ())
             if reasons:
@@ -492,6 +492,12 @@ class PaperTradingEngine:
                 "target_r_multiple": signal.target_r_multiple,
                 "confidence": signal.confidence,
                 "reasons": list(signal.reasons),
+                "setup_model": signal.setup_model,
+                "legacy_setup": signal.legacy_setup,
+                "market_state": signal.market_state,
+                "bias": signal.bias,
+                "target_source": signal.target_source,
+                "management_profile": signal.management_profile,
             }
         )
         self._markers.append(
@@ -501,6 +507,9 @@ class PaperTradingEngine:
                 "price": signal.entry_price,
                 "label": signal.setup,
                 "side": signal.side.value,
+                "setup_model": signal.setup_model,
+                "market_state": signal.market_state,
+                "bias": signal.bias,
             }
         )
         self._write_journal("signal", {"signal": signal})
@@ -585,6 +594,12 @@ class PaperTradingEngine:
             opened_at=event.timestamp,
             entry_fee=entry_fee,
             initial_quantity=filled_quantity,
+            setup_model=signal.setup_model,
+            legacy_setup=signal.legacy_setup,
+            market_state=signal.market_state,
+            bias=signal.bias,
+            target_source=signal.target_source,
+            management_profile=signal.management_profile,
         )
         self._details["paper"]["orders"].append(
             {
@@ -592,6 +607,12 @@ class PaperTradingEngine:
                 "symbol": signal.symbol,
                 "side": signal.side.value,
                 "setup": signal.setup,
+                "setup_model": signal.setup_model,
+                "legacy_setup": signal.legacy_setup,
+                "market_state": signal.market_state,
+                "bias": signal.bias,
+                "target_source": signal.target_source,
+                "management_profile": signal.management_profile,
                 "quantity": filled_quantity,
                 "requested_quantity": pending.quantity,
                 "entry_price": fill_price,
@@ -653,6 +674,8 @@ class PaperTradingEngine:
         self._shift_stop_to_break_even(event)
         self._shift_stop_after_kline_momentum(event)
         self._reduce_for_absorption(event)
+        if self._close_for_no_followthrough(event):
+            return True
         return self._close_for_orderflow_invalidation(event)
 
     def _update_max_moves(self, price: float) -> None:
@@ -691,7 +714,7 @@ class PaperTradingEngine:
             entry_price=position.entry_price,
             initial_stop_price=position.initial_stop_price,
             current_price=event.price,
-            break_even_trigger_r=position.target_r_multiple / 2.0,
+            break_even_trigger_r=self._break_even_trigger_r(position),
             round_trip_cost=round_trip_cost,
         )
         if stop_price is None:
@@ -699,6 +722,35 @@ class PaperTradingEngine:
         position.stop_price = stop_price
         position.break_even_shifted = True
         self._record_protective_action("break_even_shift", event.timestamp, {"signal_id": position.signal_id, "stop_price": position.stop_price})
+
+    def _break_even_trigger_r(self, position: PaperOpenPosition) -> float:
+        profile = position.management_profile or position.setup_model
+        if profile in {"squeeze", "squeeze_continuation"}:
+            return self.execution_config.squeeze_break_even_r
+        if profile in {"failed_auction", "failed_auction_reversal"}:
+            return self.execution_config.failed_auction_break_even_r
+        if profile in {"lvn_acceptance"}:
+            return self.execution_config.lvn_acceptance_break_even_r
+        return position.target_r_multiple / 2.0
+
+    def _close_for_no_followthrough(self, event: TradeEvent) -> bool:
+        if self._position is None:
+            return False
+        position = self._position
+        profile = position.management_profile or position.setup_model
+        if profile not in {"squeeze", "squeeze_continuation"}:
+            return False
+        elapsed = event.timestamp - position.opened_at
+        if elapsed < self.execution_config.no_followthrough_seconds * 1000:
+            return False
+        risk = abs(position.entry_price - position.initial_stop_price)
+        if risk <= 0:
+            return False
+        favorable, _ = price_moves(position.side, position.entry_price, event.price)
+        if favorable > risk * 0.25:
+            return False
+        self._close_position(event.timestamp, event.price, "no_followthrough")
+        return True
 
     def _shift_stop_after_kline_momentum(self, event: TradeEvent) -> None:
         if self._position is None:
@@ -767,6 +819,13 @@ class PaperTradingEngine:
             {
                 "timestamp": event.timestamp, "signal_id": position.signal_id,
                 "symbol": position.symbol, "side": position.side.value,
+                "setup": position.setup,
+                "setup_model": position.setup_model,
+                "legacy_setup": position.legacy_setup,
+                "market_state": position.market_state,
+                "bias": position.bias,
+                "target_source": position.target_source,
+                "management_profile": position.management_profile,
                 "quantity": reduce_quantity, "entry_price": position.entry_price,
                 "close_price": close_fill_price, "stop_price": position.stop_price,
                 "target_price": position.target_price,
@@ -825,6 +884,12 @@ class PaperTradingEngine:
             "symbol": position.symbol,
             "side": position.side.value,
             "setup": position.setup,
+            "setup_model": position.setup_model,
+            "legacy_setup": position.legacy_setup,
+            "market_state": position.market_state,
+            "bias": position.bias,
+            "target_source": position.target_source,
+            "management_profile": position.management_profile,
             "quantity": position.quantity,
             "entry_price": position.entry_price,
             "signal_entry_price": position.signal_entry_price,
@@ -894,6 +959,12 @@ class PaperTradingEngine:
             "symbol": position.symbol,
             "side": position.side.value,
             "setup": position.setup,
+            "setup_model": position.setup_model,
+            "legacy_setup": position.legacy_setup,
+            "market_state": position.market_state,
+            "bias": position.bias,
+            "target_source": position.target_source,
+            "management_profile": position.management_profile,
             "quantity": quantity,
             "remaining_quantity": position.quantity,
             "entry_price": position.entry_price,
@@ -958,6 +1029,12 @@ class PaperTradingEngine:
             "symbol": position.symbol,
             "side": position.side.value,
             "setup": position.setup,
+            "setup_model": position.setup_model,
+            "legacy_setup": position.legacy_setup,
+            "market_state": position.market_state,
+            "bias": position.bias,
+            "target_source": position.target_source,
+            "management_profile": position.management_profile,
             "quantity": position.quantity,
             "entry_price": position.entry_price,
             "close_price": close_price,

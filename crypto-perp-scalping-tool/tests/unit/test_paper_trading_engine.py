@@ -173,6 +173,73 @@ class PaperTradingEngineTests(unittest.TestCase):
 
         self.assertEqual(engine.summary()["orders"], 1)
 
+    def test_squeeze_management_uses_setup_specific_break_even_trigger(self):
+        signal = TradeSignal(
+            id="sig-squeeze-be",
+            symbol="BTCUSDT",
+            side=SignalSide.LONG,
+            setup="vah_breakout_lvn_pullback_aggression",
+            entry_price=100,
+            stop_price=90,
+            target_price=150,
+            confidence=0.8,
+            reasons=("test",),
+            invalidation_rules=("stop",),
+            created_at=1_000,
+            target_r_multiple=5.0,
+            setup_model="squeeze_continuation",
+            management_profile="squeeze",
+        )
+        engine = PaperTradingEngine(
+            symbol="BTCUSDT",
+            equity=10_000,
+            signal_cooldown_ms=0,
+            execution_config=PaperExecutionConfig(limit_entry_pullback_bps=0.0),
+        )
+        engine.signals = OneShotSignalEngine(signal)
+
+        engine.process_trade(TradeEvent(1_000, "BTCUSDT", 100, 1, False), received_at=1_000)
+        engine.process_trade(TradeEvent(2_000, "BTCUSDT", 100, 1, False), received_at=2_000)
+        engine.process_trade(TradeEvent(3_000, "BTCUSDT", 113, 1, False), received_at=3_000)
+
+        position = engine.summary()["open_position"]
+        self.assertIsNotNone(position)
+        self.assertGreater(position["stop_price"], 100)
+        actions = engine.details()["paper"]["protective_actions"]
+        self.assertTrue(any(action["action"] == "break_even_shift" for action in actions))
+
+    def test_squeeze_management_closes_when_no_followthrough_after_timeout(self):
+        signal = TradeSignal(
+            id="sig-squeeze-timeout",
+            symbol="BTCUSDT",
+            side=SignalSide.LONG,
+            setup="vah_breakout_lvn_pullback_aggression",
+            entry_price=100,
+            stop_price=90,
+            target_price=150,
+            confidence=0.8,
+            reasons=("test",),
+            invalidation_rules=("stop"),
+            created_at=1_000,
+            setup_model="squeeze_continuation",
+            management_profile="squeeze",
+        )
+        engine = PaperTradingEngine(
+            symbol="BTCUSDT",
+            equity=10_000,
+            signal_cooldown_ms=0,
+            execution_config=PaperExecutionConfig(limit_entry_pullback_bps=0.0),
+        )
+        engine.signals = OneShotSignalEngine(signal)
+
+        engine.process_trade(TradeEvent(1_000, "BTCUSDT", 100, 1, False), received_at=1_000)
+        engine.process_trade(TradeEvent(2_000, "BTCUSDT", 100, 1, False), received_at=2_000)
+        engine.process_trade(TradeEvent(48_000, "BTCUSDT", 100.5, 1, False), received_at=48_000)
+
+        self.assertIsNone(engine.summary()["open_position"])
+        closed = engine.details()["paper"]["closed_positions"]
+        self.assertEqual(closed[-1]["exit_reason"], "no_followthrough")
+
     def test_ignores_other_symbols(self):
         engine = PaperTradingEngine(symbol="BTCUSDT", equity=10_000)
 

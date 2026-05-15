@@ -765,3 +765,106 @@ signals:
 - 任意异常优先保护仓位，其次才考虑继续交易。
 - 所有交易决策必须可复盘。
 - 每一次自动下单都必须能解释为：在哪里交易、为什么交易、错了在哪里退出、赚了在哪里退出。
+
+## 18. 实盘逻辑状态机版本
+
+### 18.1 设计目标
+
+新版本把视频中的实盘交易思想实现为可复用状态机，而不是逐条硬编码 setup。核心变化是先判断市场拍卖状态，再判断方向叙事，然后等待关键位置触发、完整 1m K 收盘确认和订单流位移确认，最后才生成交易计划。
+
+对外仍保留 `SignalEngine.evaluate(...) -> TradeSignal | None`，但内部 pipeline 为：
+
+```text
+MarketStateEngine
+  -> BiasEngine
+  -> SetupCandidateEngine
+  -> ConfirmationGate
+  -> TradePlanBuilder
+  -> RiskEngine
+  -> PaperTradingEngine
+```
+
+### 18.2 新增配置段
+
+默认配置新增：
+
+```yaml
+market_state:
+  compression_bars: 5
+  compression_range_ratio: 0.65
+  absorption_delta_ratio: 2.0
+  absorption_max_displacement_atr: 0.25
+  failed_auction_window_seconds: 90
+  value_acceptance_close_bars: 2
+confirmation:
+  require_1m_close: true
+  close_buffer_bps: 1.0
+  max_reclaim_seconds: 20
+  min_displacement_atr: 0.15
+  min_delta_ratio: 1.2
+  min_volume_ratio: 1.3
+trade_plan:
+  min_reward_risk: 1.2
+  fallback_reward_risk: 3.0
+  max_reward_risk: 6.0
+  structure_target_first: true
+  atr_stop_mult: 0.35
+management:
+  squeeze_break_even_r: 1.25
+  failed_auction_break_even_r: 1.5
+  lvn_acceptance_break_even_r: 1.5
+  first_structure_reduce_ratio: 0.5
+  absorption_reduce_ratio: 0.5
+  no_followthrough_seconds: 45
+```
+
+### 18.3 数据结构
+
+`types.py` 新增：
+
+- `MarketStateResult`
+- `BiasResult`
+- `SetupCandidate`
+- `ConfirmationResult`
+- `TradePlan`
+- `SignalTrace`
+
+`TradeSignal` 追加可选字段：`setup_model`、`legacy_setup`、`market_state`、`bias`、`target_source`、`management_profile`、`trace`。这些字段用于复盘和报表兼容，不破坏旧调用方。
+
+### 18.4 信号模型
+
+实盘模型统一为 4 类：
+
+- `squeeze_continuation`：value 外接受后的延续突破。
+- `failed_auction_reversal`：关键位刺破失败后的回收反转。
+- `lvn_acceptance`：LVN 穿越后的外侧接受。
+- `absorption_response`：大成交无位移后的反向响应或持仓管理事件。
+
+旧 8 个 setup 不删除，作为 `legacy_setup` 写入 signal/order/report。
+
+### 18.5 Confirmation Gate
+
+所有实盘 setup 默认要求完整 1m K 收盘确认。tick 级刺破只会生成 candidate，不会直接变成 `TradeSignal`。确认层会检查：
+
+- close buffer bps
+- delta ratio
+- volume ratio
+- ATR displacement
+- reclaim failure
+
+失败原因必须写入 `last_reject_reasons`，例如 `candle_close_not_confirmed`、`delta_not_confirmed`、`volume_not_confirmed`、`insufficient_displacement`、`trigger_reclaimed`。
+
+### 18.6 交易计划与报告
+
+目标位优先使用前方结构，而不是固定 R：
+
+1. `context_60m` POC/HVN/VAH/VAL。
+2. `execution_30m` POC/HVN/VAH/VAL。
+3. session high/low 或前高/前低。
+4. capped R fallback。
+
+Backtest report 增加 `by_strategy_context`，按 `setup_model|market_state|session` 聚合信号、交易、胜数和净 PnL。Dashboard `/api/orderflow` summary 增加 `market_state`、`bias`、`last_reject_reasons`。
+
+### 18.7 安全边界
+
+本版本仍只改变 paper/live dashboard/backtest 逻辑，不新增真实下单能力。真实交易仍必须通过显式 live mode 配置、环境变量确认、风险控制和后续人工验收。
