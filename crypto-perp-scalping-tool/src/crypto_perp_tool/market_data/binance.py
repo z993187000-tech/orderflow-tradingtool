@@ -37,7 +37,7 @@ class BinanceStreamConfig:
     @property
     def market_streams(self) -> tuple[str, ...]:
         symbol = self.symbol.lower()
-        return (f"{symbol}@aggTrade", f"{symbol}@markPrice@1s", f"{symbol}@forceOrder", f"{symbol}@kline_5m")
+        return (f"{symbol}@aggTrade", f"{symbol}@markPrice@1s", f"{symbol}@forceOrder", f"{symbol}@kline_5m", f"{symbol}@kline_1m", f"{symbol}@kline_3m")
 
     @property
     def public_streams(self) -> tuple[str, ...]:
@@ -79,6 +79,8 @@ class BinanceBookTickerParser:
             symbol=str(payload["s"]).upper(),
             bid_price=float(payload["b"]),
             ask_price=float(payload["a"]),
+            bid_qty=float(payload.get("B", 0)),
+            ask_qty=float(payload.get("A", 0)),
         )
 
 
@@ -303,7 +305,7 @@ class BinanceAggTradeClient:
             if self.on_spot is not None:
                 self.on_spot(self.spot_parser.parse(data))
             return
-        if event_type == "kline" or stream.endswith("@kline_5m"):
+        if event_type == "kline" or "@kline_" in stream:
             if self.on_kline is not None:
                 self.on_kline(self.kline_parser.parse(data))
 

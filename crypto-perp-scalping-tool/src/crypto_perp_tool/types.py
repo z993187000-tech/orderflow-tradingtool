@@ -17,6 +17,9 @@ class ProfileLevelType(StrEnum):
 
 class ProfileWindow(StrEnum):
     SESSION = "session"
+    EXECUTION = "execution_30m"
+    MICRO = "micro_15m"
+    CONTEXT = "context_60m"
     ROLLING_4H = "rolling_4h"
 
 
@@ -169,6 +172,7 @@ class TradeSignal:
     reasons: tuple[str, ...]
     invalidation_rules: tuple[str, ...]
     created_at: int
+    target_r_multiple: float = 5.0
 
 
 @dataclass(frozen=True)
@@ -230,6 +234,7 @@ class TradeRecord:
     max_favorable_move: float
     max_adverse_move: float
 
+    target_r_multiple: float = 5.0
     entry_session: str = "unknown"
     vwap_at_entry: float = 0.0
     atr_at_entry: float = 0.0
@@ -243,7 +248,7 @@ class TradeRecord:
         return [
             "trade_id", "signal_id", "setup", "symbol", "side",
             "entry_time", "entry_price", "quantity", "entry_fee",
-            "signal_entry_price", "initial_stop_price", "stop_price", "target_price",
+            "signal_entry_price", "initial_stop_price", "stop_price", "target_price", "target_r_multiple",
             "exit_time", "exit_price", "exit_reason", "exit_fee",
             "gross_pnl", "net_pnl", "pnl_percent", "holding_time_ms", "r_multiple",
             "break_even_shifted", "absorption_reduced",
@@ -276,6 +281,7 @@ def make_trade_record(
     exit_fee: float,
     gross_pnl: float,
     net_pnl: float,
+    target_r_multiple: float = 5.0,
     break_even_shifted: bool = False,
     absorption_reduced: bool = False,
     max_favorable_move: float = 0.0,
@@ -321,6 +327,7 @@ def make_trade_record(
         absorption_reduced=absorption_reduced,
         max_favorable_move=max_favorable_move,
         max_adverse_move=max_adverse_move,
+        target_r_multiple=target_r_multiple,
         entry_session=entry_session,
         vwap_at_entry=vwap_at_entry,
         atr_at_entry=atr_at_entry,

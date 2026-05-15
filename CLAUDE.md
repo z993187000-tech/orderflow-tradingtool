@@ -16,4 +16,14 @@ Key routing rules:
 - Save progress → invoke /context-save
 - Resume context → invoke /context-restore
 
+## Strategy documentation
+
+The authoritative strategy specification lives at `crypto-perp-scalping-tool/docs/strategy.md`. When making ANY change to:
+- `crypto-perp-scalping-tool/src/crypto_perp_tool/signals/engine.py` (trading setups, forbidden conditions)
+- `crypto-perp-scalping-tool/src/crypto_perp_tool/profile/engine.py` (level calculations)
+- `crypto-perp-scalping-tool/src/crypto_perp_tool/risk/engine.py` (risk controls)
+- `crypto-perp-scalping-tool/config/default.yaml` (strategy parameters)
+
+you MUST update `docs/strategy.md` to match before claiming the task is complete.
+
 @Agent.md

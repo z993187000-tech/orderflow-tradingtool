@@ -100,6 +100,7 @@ def _record_from_payload(payload: dict[str, Any]) -> TradeRecord:
         absorption_reduced=bool(payload["absorption_reduced"]),
         max_favorable_move=float(payload["max_favorable_move"]),
         max_adverse_move=float(payload["max_adverse_move"]),
+        target_r_multiple=float(payload.get("target_r_multiple", 5.0)),
         entry_session=payload.get("entry_session", "unknown"),
         vwap_at_entry=float(payload.get("vwap_at_entry", 0)),
         atr_at_entry=float(payload.get("atr_at_entry", 0)),

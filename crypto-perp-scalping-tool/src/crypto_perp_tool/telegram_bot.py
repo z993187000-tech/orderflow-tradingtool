@@ -70,7 +70,11 @@ class TelegramCommandHandler:
     def _handle_set(self, text: str) -> str:
         parts = text.strip().split()
         if len(parts) < 3:
-            return "usage: /set <key> <value>\nkeys: risk_per_trade, daily_loss_limit, max_consecutive_losses, max_leverage, max_symbol_notional, equity, cooldown_ms, flash_atr_mult, flash_pct"
+            return ("usage: /set <key> <value>\n"
+                    "risk keys: risk_per_trade, daily_loss_limit, max_consecutive_losses, max_leverage, max_symbol_notional\n"
+                    "store keys: equity, cooldown_ms, flash_atr_mult, flash_pct\n"
+                    "strategy keys: reward_risk, dynamic_reward_risk_enabled, reward_risk_min, reward_risk_max, "
+                    "atr_stop_mult, min_stop_cost_mult, min_target_cost_mult, max_holding_min")
         key = parts[1]
         value = parts[2]
         return self.service.update_setting(key, value)
@@ -84,6 +88,20 @@ class TelegramCommandHandler:
         lines.append(f"  max_leverage={risk.get('max_leverage','?')}")
         lines.append(f"  max_symbol_notional={risk.get('max_symbol_notional_equity_multiple','?')}")
         if self._store is not None:
+            settings = getattr(self._store, 'settings', None)
+            if settings is not None:
+                exec_s = settings.execution
+                lines.append("")
+                lines.append("Strategy settings:")
+                lines.append(f"  reward_risk={exec_s.reward_risk}")
+                lines.append(f"  dynamic_reward_risk_enabled={exec_s.dynamic_reward_risk_enabled}")
+                lines.append(f"  reward_risk_min={exec_s.reward_risk_min}")
+                lines.append(f"  reward_risk_max={exec_s.reward_risk_max}")
+                lines.append(f"  atr_stop_mult={exec_s.atr_stop_mult}")
+                lines.append(f"  break_even_trigger_r=position_target_r_multiple / 2")
+                lines.append(f"  min_stop_cost_mult={exec_s.min_stop_cost_mult}")
+                lines.append(f"  min_target_cost_mult={exec_s.min_target_cost_mult}")
+                lines.append(f"  max_holding_min={exec_s.max_holding_ms // 60_000}")
             store_lines = ["Store settings:"]
             store_lines.append(f"  equity={getattr(self._store, 'equity', '?')}")
             cb = getattr(self._store, '_circuit_breaker', None)

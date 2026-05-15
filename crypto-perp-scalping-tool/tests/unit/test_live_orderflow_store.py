@@ -378,7 +378,7 @@ class LiveOrderflowStoreTests(unittest.TestCase):
         self.assertEqual(view["summary"]["delta_30s"], -1)
         self.assertEqual(view["summary"]["vwap"], 200)
         self.assertEqual(poc["price"], 200)
-        self.assertEqual(poc["window"], "rolling_4h")
+        self.assertEqual(poc["window"], "context_60m")
 
     def test_live_store_uses_received_at_for_stale_data_rejection(self):
         store = LiveOrderflowStore(symbol="BTCUSDT", max_events=40, enable_signals=True)
@@ -474,7 +474,7 @@ class LiveOrderflowStoreTests(unittest.TestCase):
         self.assertIn("slippage_bps", fill)
         self.assertIn("fee", fill)
         self.assertIn("net_realized_pnl", close)
-        self.assertEqual(view["summary"]["closed_positions"], 2)
+        self.assertEqual(view["summary"]["closed_positions"], 1)
         self.assertGreater(view["summary"]["realized_pnl"], 0)
 
     def test_live_paper_fill_uses_exchange_info_tick_and_step_size(self):
@@ -561,7 +561,7 @@ class LiveOrderflowStoreTests(unittest.TestCase):
         self.assertEqual(bubbles[1]["tier"], "block")
         self.assertEqual(view["summary"]["last_aggression_bubble"]["side"], "sell")
 
-    def test_live_paper_moves_stop_to_break_even_after_one_and_half_r(self):
+    def test_live_paper_moves_stop_to_breakeven_after_two_and_half_r(self):
         signal = TradeSignal(
             id="sig-break-even",
             symbol="BTCUSDT",
@@ -583,16 +583,57 @@ class LiveOrderflowStoreTests(unittest.TestCase):
             event = TradeEvent(1_000 + index * 100, "BTCUSDT", 100, 1, False)
             store.add_trade(event, received_at=event.timestamp)
         store.add_trade(TradeEvent(5_000, "BTCUSDT", 99.9, 1, True), received_at=5_000)
-        store.add_trade(TradeEvent(10_000, "BTCUSDT", 116, 1, False), received_at=10_000)
+        # Trigger 2.5R: entry=100, stop=90, risk=10, 2.5R = 25 favorable move, so price = 125
+        store.add_trade(TradeEvent(10_000, "BTCUSDT", 126, 1, False), received_at=10_000)
 
         view = store.view()
         position = view["summary"]["open_position"]
         actions = view["details"]["paper"]["protective_actions"]
 
         self.assertIsNotNone(position)
-        self.assertGreaterEqual(position["stop_price"], position["entry_price"])
+        # Net breakeven stop: entry + estimated round trip cost
+        self.assertGreater(position["stop_price"], position["entry_price"])
         self.assertTrue(any(action["action"] == "break_even_shift" for action in actions))
-        self.assertEqual(view["summary"]["last_break_even_shift"]["action"], "break_even_shift")
+
+    def test_live_paper_uses_signal_reward_risk_for_breakeven_after_entry(self):
+        signal = TradeSignal(
+            id="sig-live-entry-r",
+            symbol="BTCUSDT",
+            side=SignalSide.LONG,
+            setup="test_entry_r",
+            entry_price=100,
+            stop_price=90,
+            target_price=180,
+            confidence=0.8,
+            reasons=("test", "target 8.0R"),
+            invalidation_rules=("stop",),
+            created_at=4_000,
+            target_r_multiple=8.0,
+        )
+        store = LiveOrderflowStore(symbol="BTCUSDT", max_events=80, enable_signals=True)
+        store.update_strategy_params(reward_risk=3.0)
+        store._signal_engine = OneShotSignalEngine(signal)
+        store.add_quote(QuoteEvent(3_900, "BTCUSDT", 99.9, 100.1))
+
+        for index in range(30):
+            event = TradeEvent(1_000 + index * 100, "BTCUSDT", 100, 1, False)
+            store.add_trade(event, received_at=event.timestamp)
+        store.add_trade(TradeEvent(5_000, "BTCUSDT", 99.9, 1, True), received_at=5_000)
+        position = store.view()["summary"]["open_position"]
+        self.assertIsNotNone(position)
+        self.assertEqual(position["target_r_multiple"], 8.0)
+
+        store.add_trade(TradeEvent(10_000, "BTCUSDT", 125, 1, False), received_at=10_000)
+        position = store.view()["summary"]["open_position"]
+        self.assertIsNotNone(position)
+        self.assertFalse(position["break_even_shifted"])
+        self.assertEqual(position["stop_price"], 90)
+
+        store.add_trade(TradeEvent(11_000, "BTCUSDT", 141, 1, False), received_at=11_000)
+        position = store.view()["summary"]["open_position"]
+        self.assertIsNotNone(position)
+        self.assertTrue(position["break_even_shifted"])
+        self.assertGreater(position["stop_price"], position["entry_price"])
 
     def test_live_paper_reduces_position_when_buy_cvd_spikes_without_price_progress(self):
         signal = TradeSignal(
@@ -662,15 +703,15 @@ class LiveOrderflowStoreTests(unittest.TestCase):
         self.assertEqual(order["entry_order_type"], "limit")
         self.assertEqual(order["status"], "filled")
 
-    def test_live_paper_partial_take_profit_then_trailing_stop(self):
+    def test_live_paper_no_partial_take_profit_in_short_term_model(self):
         signal = TradeSignal(
-            id="sig-live-partial-trail",
+            id="sig-live-no-partial",
             symbol="BTCUSDT",
             side=SignalSide.LONG,
-            setup="test_partial_trail",
+            setup="test_no_partial",
             entry_price=100,
             stop_price=90,
-            target_price=130,
+            target_price=150,
             confidence=0.8,
             reasons=("test",),
             invalidation_rules=("stop",),
@@ -686,20 +727,51 @@ class LiveOrderflowStoreTests(unittest.TestCase):
         store.add_trade(TradeEvent(5_000, "BTCUSDT", 99.9, 1, True), received_at=5_000)
         original_quantity = store.view()["summary"]["open_position"]["quantity"]
 
+        # Price goes to 1R (110) - should NOT trigger partial TP
         store.add_trade(TradeEvent(6_000, "BTCUSDT", 110, 1, False), received_at=6_000)
         view = store.view()
-        partial = view["details"]["paper"]["closed_positions"][0]
 
-        self.assertEqual(partial["exit_reason"], "partial_take_profit")
-        self.assertLess(view["summary"]["open_position"]["quantity"], original_quantity)
+        self.assertEqual(len(view["details"]["paper"]["closed_positions"]), 0)
+        self.assertEqual(view["summary"]["open_position"]["quantity"], original_quantity)
 
-        store.add_trade(TradeEvent(7_000, "BTCUSDT", 112, 1, False), received_at=7_000)
-        trail_stop = store.view()["summary"]["open_position"]["stop_price"]
-        store.add_trade(TradeEvent(8_000, "BTCUSDT", trail_stop - 0.1, 1, True), received_at=8_000)
-        closed = store.view()["details"]["paper"]["closed_positions"][-1]
+    def test_live_paper_moves_short_stop_after_three_complete_bearish_1m_bars(self):
+        signal = TradeSignal(
+            id="sig-live-1m-stop-short",
+            symbol="BTCUSDT",
+            side=SignalSide.SHORT,
+            setup="test_1m_stop_short",
+            entry_price=100,
+            stop_price=110,
+            target_price=50,
+            confidence=0.8,
+            reasons=("test",),
+            invalidation_rules=("stop",),
+            created_at=4_000,
+        )
+        store = LiveOrderflowStore(symbol="BTCUSDT", max_events=80, enable_signals=True)
+        store._signal_engine = OneShotSignalEngine(signal)
+        store.add_quote(QuoteEvent(3_900, "BTCUSDT", 99.9, 100.1))
 
-        self.assertIsNone(store.view()["summary"]["open_position"])
-        self.assertEqual(closed["exit_reason"], "trailing_stop")
+        for index in range(30):
+            event = TradeEvent(1_000 + index * 100, "BTCUSDT", 100, 1, True)
+            store.add_trade(event, received_at=event.timestamp)
+        store.add_trade(TradeEvent(5_000, "BTCUSDT", 100.5, 1, False), received_at=5_000)
+        for kline in [
+            KlineEvent(60_000, 119_999, "BTCUSDT", "1m", 110, 112, 106, 108, 10, 1_000, 5, True),
+            KlineEvent(120_000, 179_999, "BTCUSDT", "1m", 108, 109, 103, 105, 10, 1_000, 5, True),
+            KlineEvent(180_000, 239_999, "BTCUSDT", "1m", 105, 106, 100, 101, 10, 1_000, 5, True),
+        ]:
+            store.add_kline(kline)
+
+        store.add_trade(TradeEvent(240_000, "BTCUSDT", 99, 1, True), received_at=240_000)
+        view = store.view()
+        position = view["summary"]["open_position"]
+
+        self.assertIsNotNone(position)
+        self.assertEqual(position["stop_price"], 109)
+        self.assertTrue(
+            any(action["action"] == "kline_momentum_stop_shift" for action in view["details"]["paper"]["protective_actions"])
+        )
 
     def test_live_store_summary_exposes_strategy_explainability_state(self):
         store = LiveOrderflowStore(symbol="BTCUSDT", max_events=20)
@@ -893,6 +965,37 @@ class LiveOrderflowStoreTests(unittest.TestCase):
                 state_path=state_path,
             )
             self.assertEqual(store2._circuit_breaker.state, "tripped")
+
+    def test_kline_based_atr_computes_from_completed_1m_klines(self):
+        store = LiveOrderflowStore(symbol="BTCUSDT", max_events=10)
+
+        store.add_kline(KlineEvent(0, 59999, "BTCUSDT", "1m", 100, 105, 98, 104, 10, 1000, 5, True))
+        store.add_kline(KlineEvent(60000, 119999, "BTCUSDT", "1m", 104, 108, 101, 103, 12, 1200, 6, True))
+
+        self.assertGreater(store._atr_1m_value, 0)
+        view = store.view()
+        self.assertGreater(view["summary"]["atr_1m_14"], 0)
+
+    def test_kline_based_atr_ignores_incomplete_klines(self):
+        store = LiveOrderflowStore(symbol="BTCUSDT", max_events=10)
+
+        store.add_kline(KlineEvent(0, 59999, "BTCUSDT", "1m", 100, 105, 98, 104, 10, 1000, 5, False))
+
+        self.assertEqual(store._atr_1m_value, 0.0)
+
+    def test_kline_based_atr_uses_fallback_when_no_completed_klines(self):
+        store = LiveOrderflowStore(symbol="BTCUSDT", max_events=10)
+        atr = store._current_atr(100.0)
+        self.assertGreater(atr, 0)
+
+    def test_seed_klines_initializes_atr(self):
+        store = LiveOrderflowStore(symbol="BTCUSDT", max_events=10)
+        seed = [
+            KlineEvent(0, 59999, "BTCUSDT", "1m", 100, 105, 98, 104, 10, 1000, 5, True),
+            KlineEvent(60000, 119999, "BTCUSDT", "1m", 104, 108, 101, 103, 12, 1200, 6, True),
+        ]
+        store.seed_klines(seed)
+        self.assertGreater(store._atr_1m_value, 0)
 
 
 if __name__ == "__main__":

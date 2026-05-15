@@ -20,10 +20,10 @@ class BinanceMarketDataTests(unittest.TestCase):
     def test_stream_url_uses_usdm_futures_aggtrade_stream(self):
         config = BinanceStreamConfig(symbol="BTCUSDT")
 
-        self.assertEqual(config.market_streams, ("btcusdt@aggTrade", "btcusdt@markPrice@1s", "btcusdt@forceOrder", "btcusdt@kline_5m"))
+        self.assertEqual(config.market_streams, ("btcusdt@aggTrade", "btcusdt@markPrice@1s", "btcusdt@forceOrder", "btcusdt@kline_5m", "btcusdt@kline_1m", "btcusdt@kline_3m"))
         self.assertEqual(config.public_streams, ("btcusdt@bookTicker",))
         self.assertEqual(config.spot_streams, ("btcusdt@trade",))
-        self.assertEqual(config.market_url, "wss://fstream.binance.com/market/stream?streams=btcusdt@aggTrade/btcusdt@markPrice@1s/btcusdt@forceOrder/btcusdt@kline_5m")
+        self.assertEqual(config.market_url, "wss://fstream.binance.com/market/stream?streams=btcusdt@aggTrade/btcusdt@markPrice@1s/btcusdt@forceOrder/btcusdt@kline_5m/btcusdt@kline_1m/btcusdt@kline_3m")
         self.assertEqual(config.public_url, "wss://fstream.binance.com/public/stream?streams=btcusdt@bookTicker")
         self.assertEqual(config.spot_url, "wss://stream.binance.com:9443/stream?streams=btcusdt@trade")
 
@@ -65,6 +65,36 @@ class BinanceMarketDataTests(unittest.TestCase):
         self.assertEqual(event.bid_price, 80100.10)
         self.assertEqual(event.ask_price, 80100.30)
         self.assertAlmostEqual(event.mid_price, 80100.20)
+
+    def test_book_ticker_parser_extracts_bid_ask_quantities(self):
+        payload = {
+            "e": "bookTicker",
+            "E": 1569514978123,
+            "s": "BTCUSDT",
+            "b": "80100.10",
+            "B": "1.5",
+            "a": "80100.30",
+            "A": "2.3",
+        }
+
+        event = BinanceBookTickerParser().parse(payload)
+
+        self.assertEqual(event.bid_qty, 1.5)
+        self.assertEqual(event.ask_qty, 2.3)
+
+    def test_book_ticker_parser_handles_missing_quantities(self):
+        payload = {
+            "e": "bookTicker",
+            "E": 1569514978123,
+            "s": "BTCUSDT",
+            "b": "80100.10",
+            "a": "80100.30",
+        }
+
+        event = BinanceBookTickerParser().parse(payload)
+
+        self.assertEqual(event.bid_qty, 0.0)
+        self.assertEqual(event.ask_qty, 0.0)
 
     def test_mark_price_parser_converts_payload_to_mark_event(self):
         payload = {

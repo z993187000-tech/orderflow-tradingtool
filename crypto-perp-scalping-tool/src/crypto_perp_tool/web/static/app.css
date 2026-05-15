@@ -76,6 +76,7 @@ h2 {
   align-items: center;
 }
 
+input,
 select,
 button {
   height: 34px;
@@ -88,6 +89,26 @@ button {
 
 button {
   cursor: pointer;
+}
+
+.view-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #171717;
+}
+
+.view-tabs button {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+}
+
+.view-tabs button.is-active {
+  background: var(--panel-2);
+  color: var(--text);
 }
 
 #circuitResumeButton {
@@ -261,6 +282,105 @@ button {
   margin-bottom: 16px;
 }
 
+.backtest-workspace {
+  display: grid;
+  grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
+  gap: 16px;
+}
+
+.backtest-form {
+  align-self: start;
+}
+
+.backtest-form label {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.backtest-form input,
+.backtest-form select {
+  width: 100%;
+  color: var(--text);
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.form-status {
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.backtest-report {
+  min-height: 540px;
+}
+
+.backtest-report.is-empty .backtest-metrics,
+.backtest-report.is-empty .backtest-tables,
+.backtest-report.is-empty canvas {
+  opacity: 0.35;
+}
+
+.backtest-errors {
+  margin-bottom: 12px;
+  padding: 10px;
+  border: 1px solid rgba(239, 91, 91, 0.55);
+  border-radius: 6px;
+  background: rgba(239, 91, 91, 0.1);
+  color: var(--sell);
+  font-size: 13px;
+}
+
+.backtest-metrics {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.backtest-metric {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #171717;
+}
+
+.backtest-metric span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.backtest-metric strong {
+  display: block;
+  margin-top: 6px;
+  font-size: 18px;
+  overflow-wrap: anywhere;
+}
+
+#backtestEquityCanvas {
+  height: 220px;
+  margin-bottom: 14px;
+}
+
+.backtest-tables {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr);
+  gap: 14px;
+}
+
+.backtest-tables h3 {
+  margin: 0 0 8px;
+  font-size: 13px;
+}
+
 .chart-panel:first-child {
   grid-area: price;
 }
@@ -366,6 +486,15 @@ td:nth-child(2) {
   .workspace {
     grid-template-columns: 1fr;
     grid-template-areas: "price";
+  }
+
+  .backtest-workspace,
+  .backtest-tables {
+    grid-template-columns: 1fr;
+  }
+
+  .backtest-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   #priceCanvas {

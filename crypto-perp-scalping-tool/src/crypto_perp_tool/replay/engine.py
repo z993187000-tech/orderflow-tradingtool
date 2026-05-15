@@ -14,7 +14,7 @@ from crypto_perp_tool.market_data import (
     TimeWindowBuffer,
     TradeEvent,
 )
-from crypto_perp_tool.profile import VolumeProfileEngine
+from crypto_perp_tool.profile import build_profile_levels
 from crypto_perp_tool.risk import RiskEngine
 from crypto_perp_tool.session import SessionDetector
 from crypto_perp_tool.signals import SignalEngine
@@ -90,7 +90,7 @@ class ReplayEngine:
         self._quotes: dict[int, QuoteEvent] = {}
         self._original_signals: list[dict[str, Any]] = []
         self._trade_window = TimeWindowBuffer[TradeEvent](
-            max_window_ms=self.settings.profile.rolling_window_minutes * 60 * 1000
+            max_window_ms=self.settings.profile.context_window_minutes * 60 * 1000
         )
         self._report: ReplayReport | None = None
 
@@ -154,6 +154,16 @@ class ReplayEngine:
             min_reward_risk=self.settings.signals.min_reward_risk,
             max_data_lag_ms=self.settings.execution.max_data_lag_ms,
             session_gating_enabled=self.settings.signals.session_gating_enabled,
+            reward_risk=self.settings.execution.reward_risk,
+            dynamic_reward_risk_enabled=self.settings.execution.dynamic_reward_risk_enabled,
+            reward_risk_min=self.settings.execution.reward_risk_min,
+            reward_risk_max=self.settings.execution.reward_risk_max,
+            atr_stop_mult=self.settings.execution.atr_stop_mult,
+            min_stop_cost_mult=self.settings.execution.min_stop_cost_mult,
+            min_target_cost_mult=self.settings.execution.min_target_cost_mult,
+            execution_window=f"execution_{self.settings.profile.execution_window_minutes}m",
+            micro_window=f"micro_{self.settings.profile.micro_window_minutes}m",
+            context_window=f"context_{self.settings.profile.context_window_minutes}m",
         )
         risk_engine = RiskEngine(self.settings.risk)
 
@@ -212,10 +222,6 @@ class ReplayEngine:
             bid = quote.bid_price if quote else event.price * 0.9999
             ask = quote.ask_price if quote else event.price * 1.0001
 
-            profile = VolumeProfileEngine(bin_size=self.bin_size, value_area_ratio=self.settings.profile.value_area_ratio)
-            for profile_event in self._trade_window.items_since(event.timestamp, self.settings.profile.rolling_window_minutes * 60 * 1000):
-                profile.add_trade(profile_event.price, profile_event.quantity, timestamp=profile_event.timestamp)
-
             snapshot = MarketSnapshot(
                 exchange=self.settings.exchange,
                 symbol=self.symbol,
@@ -231,7 +237,7 @@ class ReplayEngine:
                 delta_30s=delta_30s,
                 delta_60s=delta_60s,
                 volume_30s=volume_30s,
-                profile_levels=tuple(profile.levels("rolling_4h")),
+                profile_levels=self._profile_levels(event.timestamp),
                 atr_3m_14=atr_3m.latest_atr,
                 cumulative_delta=cumulative_delta,
                 session=session_detector.detect(event.timestamp).value,
@@ -327,12 +333,47 @@ class ReplayEngine:
 
     def _compute_vwap(self, timestamp: int) -> float:
         events = list(self._trade_window.items_since(
-            timestamp, self.settings.profile.rolling_window_minutes * 60 * 1000
+            timestamp, self.settings.profile.context_window_minutes * 60 * 1000
         ))
         quantity = sum(e.quantity for e in events)
         if quantity <= 0:
             return 0.0
         return sum(e.price * e.quantity for e in events) / quantity
+
+    def _profile_levels(self, timestamp: int):
+        settings = self.settings.profile
+        events = self._trade_window.items_since(timestamp, settings.context_window_minutes * 60 * 1000)
+        trades = [(event.price, event.quantity, event.timestamp) for event in events]
+        return (
+            *build_profile_levels(
+                trades,
+                timestamp=timestamp,
+                window_ms=settings.execution_window_minutes * 60 * 1000,
+                label=f"execution_{settings.execution_window_minutes}m",
+                bin_size=self.bin_size,
+                value_area_ratio=settings.value_area_ratio,
+                min_trades=settings.min_execution_profile_trades,
+                min_bins=settings.min_profile_bins,
+            ),
+            *build_profile_levels(
+                trades,
+                timestamp=timestamp,
+                window_ms=settings.micro_window_minutes * 60 * 1000,
+                label=f"micro_{settings.micro_window_minutes}m",
+                bin_size=self.bin_size,
+                value_area_ratio=settings.value_area_ratio,
+                min_trades=settings.min_micro_profile_trades,
+                min_bins=settings.min_profile_bins,
+            ),
+            *build_profile_levels(
+                trades,
+                timestamp=timestamp,
+                window_ms=settings.context_window_minutes * 60 * 1000,
+                label=f"context_{settings.context_window_minutes}m",
+                bin_size=self.bin_size,
+                value_area_ratio=settings.value_area_ratio,
+            ),
+        )
 
     def _spread_bps(self, event: TradeEvent) -> float:
         quote = self._quotes.get(event.timestamp)
@@ -349,4 +390,5 @@ def _normalize_signal(data: dict[str, Any], fallback_time: int) -> dict[str, Any
         "entry_price": float(data.get("entry_price", 0)),
         "stop_price": float(data.get("stop_price", 0)),
         "target_price": float(data.get("target_price", 0)),
+        "target_r_multiple": float(data.get("target_r_multiple", 0)),
     }

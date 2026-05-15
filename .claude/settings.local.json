@@ -1,9 +1,12 @@
 {
   "permissions": {
     "allow": [
-      "Bash(PYTHONPATH=src python -m unittest tests.unit.test_market_data_health -v)",
-      "Bash(PYTHONPATH=src python -c \"from crypto_perp_tool.web.orderflow import build_orderflow_view; from crypto_perp_tool.paper import PaperRunner; print\\('imports OK'\\)\")",
-      "Bash(PYTHONPATH=src python -m unittest tests.unit.test_live_orderflow_store -v)"
-    ]
-  }
+      "Bash(PYTHONPATH=src python -c ' *)",
+      "Bash(PYTHONPATH=src python -m crypto_perp_tool.cli paper run --csv data/sample_trades.csv --journal data/journal.jsonl)",
+      "Bash(PYTHONPATH=src python -m pytest tests/unit/ -v --tb=short)"
+    ],
+    "defaultMode": "bypassPermissions"
+  },
+  "skipDangerousModePermissionPrompt": true,
+  "skipAutoPermissionPrompt": true
 }

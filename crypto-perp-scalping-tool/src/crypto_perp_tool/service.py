@@ -9,7 +9,17 @@ from crypto_perp_tool.journal import JsonlJournal
 
 _RISK_KEYS = {"risk_per_trade", "daily_loss_limit", "max_consecutive_losses", "max_leverage", "max_symbol_notional"}
 _STORE_KEYS = {"equity", "cooldown_ms", "flash_atr_mult", "flash_pct"}
-_ALL_KEYS = _RISK_KEYS | _STORE_KEYS
+_STRATEGY_KEYS = {
+    "reward_risk",
+    "dynamic_reward_risk_enabled",
+    "reward_risk_min",
+    "reward_risk_max",
+    "atr_stop_mult",
+    "min_stop_cost_mult",
+    "min_target_cost_mult",
+    "max_holding_min",
+}
+_ALL_KEYS = _RISK_KEYS | _STORE_KEYS | _STRATEGY_KEYS
 
 
 def _validate_risk_setting(key: str, value: float | int) -> tuple[float | int | None, str | None]:
@@ -59,6 +69,33 @@ def _validate_risk_setting(key: str, value: float | int) -> tuple[float | int | 
         if not (0.001 <= v <= 0.05):
             return None, f"{key} must be 0.001–0.05 (0.1%–5%)"
         return v, None
+    if key in ("dynamic_reward_risk_enabled",):
+        return bool(value), None
+    if key in ("reward_risk", "reward_risk_min", "reward_risk_max"):
+        v = float(value)
+        if not (1.0 <= v <= 20.0):
+            return None, f"{key} must be 1.0–20.0"
+        return v, None
+    if key in ("atr_stop_mult",):
+        v = float(value)
+        if not (0.1 <= v <= 2.0):
+            return None, f"{key} must be 0.1–2.0"
+        return v, None
+    if key in ("min_stop_cost_mult",):
+        v = float(value)
+        if not (1.0 <= v <= 10.0):
+            return None, f"{key} must be 1.0–10.0"
+        return v, None
+    if key in ("min_target_cost_mult",):
+        v = float(value)
+        if not (1.0 <= v <= 20.0):
+            return None, f"{key} must be 1.0–20.0"
+        return v, None
+    if key in ("max_holding_min",):
+        v = int(value)
+        if not (1 <= v <= 60):
+            return None, f"{key} must be 1–60 minutes"
+        return v, None
     return None, f"unknown setting: {key}"
 
 
@@ -94,12 +131,21 @@ class TradingService:
 
     def update_setting(self, key: str, raw_value: str) -> str:
         key = key.strip().lower()
-        try:
-            value = float(raw_value)
-            if key in ("max_consecutive_losses", "max_leverage", "cooldown_ms"):
-                value = int(value)
-        except ValueError:
-            return f"invalid value: {raw_value}"
+        if key == "dynamic_reward_risk_enabled":
+            raw_bool = raw_value.strip().lower()
+            if raw_bool in {"true", "1", "yes", "on"}:
+                value = True
+            elif raw_bool in {"false", "0", "no", "off"}:
+                value = False
+            else:
+                return f"invalid value: {raw_value}"
+        else:
+            try:
+                value = float(raw_value)
+                if key in ("max_consecutive_losses", "max_leverage", "cooldown_ms"):
+                    value = int(value)
+            except ValueError:
+                return f"invalid value: {raw_value}"
 
         coerced, error = _validate_risk_setting(key, value)
         if error:
@@ -107,7 +153,7 @@ class TradingService:
 
         if key in _RISK_KEYS:
             return self._update_risk(key, coerced)
-        if key in _STORE_KEYS:
+        if key in _STORE_KEYS or key in _STRATEGY_KEYS:
             return self._update_store(key, coerced)
         return f"unknown setting: {key}"
 
@@ -141,4 +187,14 @@ class TradingService:
         elif key == "flash_pct":
             if hasattr(self._store, "update_flash_crash_params"):
                 self._store.update_flash_crash_params(pct_threshold=float(value))
+        elif key == "dynamic_reward_risk_enabled":
+            if hasattr(self._store, "update_strategy_params"):
+                self._store.update_strategy_params(dynamic_reward_risk_enabled=bool(value))
+        elif key in ("reward_risk", "reward_risk_min", "reward_risk_max", "atr_stop_mult", "min_stop_cost_mult", "min_target_cost_mult"):
+            if hasattr(self._store, "update_strategy_params"):
+                kwargs: dict[str, Any] = {key: float(value)}
+                self._store.update_strategy_params(**kwargs)
+        elif key == "max_holding_min":
+            if hasattr(self._store, "update_strategy_params"):
+                self._store.update_strategy_params(max_holding_ms=int(value) * 60_000)
         return f"{key} = {value}"
