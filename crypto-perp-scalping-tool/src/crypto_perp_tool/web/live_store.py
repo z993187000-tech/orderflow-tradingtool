@@ -23,8 +23,8 @@ from crypto_perp_tool.execution.position_rules import (
     break_even_stop_price,
     estimated_round_trip_cost,
     kline_momentum_stop_price,
+    max_holding_reduced_target_price,
     price_moves,
-    should_close_for_orderflow_invalidation,
     triggered_close,
 )
 from crypto_perp_tool.journal import JsonlJournal, TradeLogger
@@ -70,6 +70,7 @@ RANGE_MS = {
 KLINE_HISTORY_LIMIT = 96
 KLINE_HISTORY_MS = 8 * 60 * 60 * 1000
 KLINE_INTERVAL_MS = 5 * 60 * 1000
+KLINE_HISTORY_LIMITS = {"1m": 20, "3m": 20, "5m": KLINE_HISTORY_LIMIT}
 
 
 def _true_range(kline: KlineEvent, prev_close: float | None) -> float:
@@ -165,7 +166,6 @@ class LiveOrderflowStore:
         self._rejected_count = 0
         self._closed_positions = 0
         self._realized_pnl = 0.0
-        self._consecutive_losses = 0
         self._position: dict[str, Any] | None = None
         self._pending_entry: dict[str, Any] | None = None
         self._historical: HistoricalWindows = HistoricalWindows()
@@ -175,8 +175,13 @@ class LiveOrderflowStore:
         self._last_received_at = 0
         self._last_received_monotonic_ms = 0
         self._recent_lags: deque[int] = deque(maxlen=20)
-        self._klines: deque[KlineEvent] = deque(maxlen=KLINE_HISTORY_LIMIT)
+        self._klines: list[KlineEvent] = []
+        self._kline_index: dict[tuple[str, int], KlineEvent] = {}
         self._synthetic_kline_keys: set[tuple[str, int]] = set()
+        self._kline_prune_interval = 10
+        self._kline_prune_counter = 0
+        self._pnl_refresh_interval = 100
+        self._pnl_refresh_counter = 0
         self._last_delta_15s = 0.0
         self._last_delta_30s = 0.0
         self._last_delta_60s = 0.0
@@ -322,6 +327,9 @@ class LiveOrderflowStore:
             for event in events:
                 if event.symbol.upper() == self.symbol:
                     self._upsert_kline(event, synthetic=False)
+            self._kline_prune_counter = 0
+            self._klines = self._pruned_klines(self._klines)
+            self._kline_index = {(k.interval, k.timestamp): k for k in self._klines}
             self._init_atr_from_klines()
 
     def _update_trade_kline(self, event: TradeEvent) -> None:
@@ -366,7 +374,7 @@ class LiveOrderflowStore:
             )
             return
 
-        latest_kline_ts = max((kline.timestamp for kline in self._klines), default=bucket_start)
+        latest_kline_ts = self._klines[-1].timestamp if self._klines else bucket_start
         if existing.is_closed and bucket_start < latest_kline_ts:
             return
         self._upsert_kline(
@@ -375,32 +383,48 @@ class LiveOrderflowStore:
         )
 
     def _find_kline(self, interval: str, timestamp: int) -> KlineEvent | None:
-        for event in self._klines:
-            if event.interval == interval and event.timestamp == timestamp:
-                return event
-        return None
+        return self._kline_index.get((interval, timestamp))
 
     def _upsert_kline(self, event: KlineEvent, synthetic: bool = False) -> None:
         key = (event.interval, event.timestamp)
-        for index, existing in enumerate(self._klines):
-            if (existing.interval, existing.timestamp) == key:
-                self._klines[index] = event
-                break
-        else:
+        existing = self._kline_index.get(key)
+        is_new = existing is None
+        if is_new:
             self._klines.append(event)
+        else:
+            idx = self._klines.index(existing)
+            self._klines[idx] = event
+        self._kline_index[key] = event
 
         if synthetic:
             self._synthetic_kline_keys.add(key)
         else:
             self._synthetic_kline_keys.discard(key)
 
-        ordered = sorted(self._klines, key=lambda kline: kline.timestamp)
-        if ordered:
-            cutoff = ordered[-1].timestamp - KLINE_HISTORY_MS
-            ordered = [kline for kline in ordered if kline.timestamp > cutoff]
-        self._klines = deque(ordered[-KLINE_HISTORY_LIMIT:], maxlen=KLINE_HISTORY_LIMIT)
-        active_keys = {(kline.interval, kline.timestamp) for kline in self._klines}
-        self._synthetic_kline_keys.intersection_update(active_keys)
+        if is_new:
+            self._kline_prune_counter += 1
+            if self._kline_prune_counter >= self._kline_prune_interval:
+                self._kline_prune_counter = 0
+                self._klines = self._pruned_klines(self._klines)
+                self._kline_index = {(k.interval, k.timestamp): k for k in self._klines}
+                active_keys = {(k.interval, k.timestamp) for k in self._klines}
+                self._synthetic_kline_keys.intersection_update(active_keys)
+
+    def _pruned_klines(self, klines: list[KlineEvent]) -> list[KlineEvent]:
+        retained: list[KlineEvent] = []
+        intervals = sorted({kline.interval for kline in klines})
+        for interval in intervals:
+            interval_klines = sorted(
+                [kline for kline in klines if kline.interval == interval],
+                key=lambda kline: kline.timestamp,
+            )
+            if not interval_klines:
+                continue
+            cutoff = interval_klines[-1].timestamp - KLINE_HISTORY_MS
+            interval_klines = [kline for kline in interval_klines if kline.timestamp > cutoff]
+            limit = KLINE_HISTORY_LIMITS.get(interval, KLINE_HISTORY_LIMIT)
+            retained.extend(interval_klines[-limit:])
+        return sorted(retained, key=lambda kline: (kline.timestamp, kline.interval))
 
     def _update_atr_from_kline(self, event: KlineEvent) -> None:
         if not event.is_closed:
@@ -457,7 +481,6 @@ class LiveOrderflowStore:
                 account_ok=True,
                 data_healthy=self._connection_status == "connected",
                 positions_reconciled=self._position is None,
-                daily_loss_within_limit=self._details["paper"]["pnl_by_range"]["24h"] > -self.settings.risk.daily_loss_limit * self.equity,
             )
             if not ok:
                 return {"resumed": False, "reason": "resume conditions not met"}
@@ -627,8 +650,9 @@ class LiveOrderflowStore:
         self._historical = self._historical.with_window("amplitude_1m", self._current_atr(event.price))
 
     def _current_atr(self, fallback_price: float) -> float:
-        if self._atr_1m_value > 0:
-            return self._atr_1m_value
+        atr = max(self._atr_1m_value, self._atr_3m_value)
+        if atr > 0:
+            return atr
         return max(fallback_price * 0.002, self._bin_size / 2)
 
     def _try_signal(self, event: TradeEvent, received_at: int) -> None:
@@ -872,6 +896,7 @@ class LiveOrderflowStore:
             "trail_stop_price": None,
             "max_favorable_move": 0.0,
             "max_adverse_move": 0.0,
+            "max_holding_target_reductions": 0,
             "initial_quantity": fill["quantity"],
             "entry_order_type": "limit",
             "entry_session": entry_session,
@@ -926,7 +951,8 @@ class LiveOrderflowStore:
         self._shift_stop_to_break_even(event)
         self._shift_stop_after_kline_momentum(event)
         self._reduce_for_absorption(event)
-        return self._close_for_orderflow_invalidation(event)
+        self._reduce_target_after_max_holding(event)
+        return False
 
     def _update_max_moves(self, price: float) -> None:
         if self._position is None:
@@ -1046,26 +1072,6 @@ class LiveOrderflowStore:
         )
         self._reduce_position(event, reduce_quantity, "absorption_reduce")
 
-    def _close_for_orderflow_invalidation(self, event: TradeEvent) -> bool:
-        if self._position is None:
-            return False
-        position = self._position
-        entry = float(position["entry_price"])
-        initial_stop = float(position.get("initial_stop_price") or position["stop_price"])
-        side = position["side"]
-        baseline = max(abs(self._historical.mean_delta_30s()) * 2.0, 10.0)
-        if not should_close_for_orderflow_invalidation(
-            side,
-            delta_30s=self._last_delta_30s,
-            baseline=baseline,
-            entry_price=entry,
-            initial_stop_price=initial_stop,
-            current_price=event.price,
-        ):
-            return False
-        self._close_position(event, event.price, "orderflow_invalidation")
-        return True
-
     def _reduce_position(self, event: TradeEvent, quantity: float, reason: str, trigger_price: float | None = None) -> None:
         if self._position is None:
             return
@@ -1087,6 +1093,7 @@ class LiveOrderflowStore:
         if reason == "absorption_reduce":
             position["absorption_reduced"] = True
         self._realized_pnl += net_pnl
+        self._force_pnl_refresh()
         reduced = {
             "timestamp": event.timestamp,
             "signal_id": position["signal_id"],
@@ -1154,6 +1161,47 @@ class LiveOrderflowStore:
         self._write_trade_record(reduce_position_ctx, event.timestamp, close_fill, gross_pnl, net_pnl, reason)
         self._save_state()
 
+    def _reduce_target_after_max_holding(self, event: TradeEvent) -> None:
+        if self._position is None:
+            return
+        position = self._position
+        entry = float(position["entry_price"])
+        target_price, target_r_multiple, reductions = max_holding_reduced_target_price(
+            position["side"],
+            entry_price=entry,
+            initial_stop_price=float(position.get("initial_stop_price") or position["stop_price"]),
+            current_target_r_multiple=float(position.get("target_r_multiple") or self.settings.execution.reward_risk),
+            elapsed_ms=event.timestamp - int(position.get("opened_at", event.timestamp)),
+            max_holding_ms=self.settings.execution.max_holding_ms,
+            completed_reductions=int(position.get("max_holding_target_reductions", 0)),
+            round_trip_cost=estimated_round_trip_cost(entry, self._instrument.taker_fee_rate),
+        )
+        position["max_holding_target_reductions"] = reductions
+        if target_price is None or target_r_multiple is None:
+            return
+        position["target_price"] = target_price
+        position["target_r_multiple"] = target_r_multiple
+        self._record_protective_action(
+            "max_holding_target_reduce",
+            event.timestamp,
+            {
+                "signal_id": position["signal_id"],
+                "target_price": target_price,
+                "target_r_multiple": target_r_multiple,
+                "reductions": reductions,
+            },
+        )
+        self._markers.append(
+            {
+                "type": "max_holding_target_reduce",
+                "timestamp": event.timestamp,
+                "price": target_price,
+                "label": "Target -1R",
+                "side": position["side"].value,
+            }
+        )
+        self._save_state()
+
     def _try_close(self, event: TradeEvent) -> None:
         if self._position is None:
             return
@@ -1187,7 +1235,7 @@ class LiveOrderflowStore:
         )
         net_pnl = gross_pnl - position["entry_fee"] - close_fill["fee"]
         self._realized_pnl += net_pnl
-        self._consecutive_losses = self._consecutive_losses + 1 if net_pnl < 0 else 0
+        self._force_pnl_refresh()
         self._closed_positions += 1
         closed = {
             "timestamp": event.timestamp,
@@ -1290,11 +1338,13 @@ class LiveOrderflowStore:
     def _account_state(self) -> AccountState:
         return AccountState(
             equity=self.equity + self._realized_pnl,
-            realized_pnl_today=self._details["paper"]["pnl_by_range"]["24h"],
-            consecutive_losses=self._consecutive_losses,
         )
 
     def _refresh_pnl_ranges(self) -> None:
+        self._pnl_refresh_counter += 1
+        if self._pnl_refresh_counter < self._pnl_refresh_interval:
+            return
+        self._pnl_refresh_counter = 0
         paper = self._details["paper"]
         now_ms = self._last_event_time or int(time.time() * 1000)
         for key, window_ms in RANGE_MS.items():
@@ -1302,6 +1352,10 @@ class LiveOrderflowStore:
                 float(event["realized_pnl"]) for event in paper["pnl_events"] if now_ms - int(event["timestamp"]) <= window_ms
             )
         paper["pnl_by_range"]["all"] = sum(float(event["realized_pnl"]) for event in paper["pnl_events"])
+
+    def _force_pnl_refresh(self) -> None:
+        self._pnl_refresh_counter = 0
+        self._refresh_pnl_ranges()
 
     def _write_journal(self, event_type: str, payload: dict[str, Any]) -> None:
         if self._journal is not None:
@@ -1370,7 +1424,6 @@ class LiveOrderflowStore:
             "saved_at_ms": int(time.time() * 1000),
             "account": {
                 "realized_pnl": self._realized_pnl,
-                "consecutive_losses": self._consecutive_losses,
             },
             "counters": {
                 "signal_count": self._signal_count,
@@ -1425,7 +1478,6 @@ class LiveOrderflowStore:
         if state.get("state_format_version") != 1:
             return self._restore_from_journal()
         self._realized_pnl = float(state["account"]["realized_pnl"])
-        self._consecutive_losses = int(state["account"]["consecutive_losses"])
         self._signal_count = int(state["counters"]["signal_count"])
         self._order_count = int(state["counters"]["order_count"])
         self._rejected_count = int(state["counters"]["rejected_count"])
@@ -1521,7 +1573,6 @@ class LiveOrderflowStore:
         self._details = details
         paper = self._details["paper"]
         self._realized_pnl = paper["pnl_by_range"]["all"]
-        self._consecutive_losses = self._count_consecutive_losses(paper["pnl_events"])
         self._signal_count = len(paper["signals"])
         self._order_count = len(paper["orders"])
         self._closed_positions = len(paper["closed_positions"])
@@ -1536,14 +1587,6 @@ class LiveOrderflowStore:
         self._refresh_pnl_ranges()
         return {"paused": False}
 
-    def _count_consecutive_losses(self, pnl_events: list[dict[str, Any]]) -> int:
-        count = 0
-        for event in reversed(pnl_events):
-            if float(event["realized_pnl"]) < 0:
-                count += 1
-            else:
-                break
-        return count
 
     def _find_open_position_from_journal(self) -> dict[str, Any] | None:
         if self._journal is None:

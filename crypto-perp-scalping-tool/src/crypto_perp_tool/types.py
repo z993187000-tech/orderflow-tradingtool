@@ -42,8 +42,6 @@ class OrderType(StrEnum):
 
 
 class CircuitBreakerReason(StrEnum):
-    DAILY_LOSS_LIMIT = "daily_loss_limit_reached"
-    MAX_CONSECUTIVE_LOSSES = "max_consecutive_losses_reached"
     WEBSOCKET_STALE = "websocket_stale"
     ORDER_PROTECTION_MISSING = "order_protection_missing"
     POSITION_MISMATCH = "position_mismatch"

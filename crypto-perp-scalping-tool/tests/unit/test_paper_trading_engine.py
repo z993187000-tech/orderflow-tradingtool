@@ -208,7 +208,7 @@ class PaperTradingEngineTests(unittest.TestCase):
         actions = engine.details()["paper"]["protective_actions"]
         self.assertTrue(any(action["action"] == "break_even_shift" for action in actions))
 
-    def test_squeeze_management_closes_when_no_followthrough_after_timeout(self):
+    def test_squeeze_management_does_not_close_for_no_followthrough_after_timeout(self):
         signal = TradeSignal(
             id="sig-squeeze-timeout",
             symbol="BTCUSDT",
@@ -236,9 +236,9 @@ class PaperTradingEngineTests(unittest.TestCase):
         engine.process_trade(TradeEvent(2_000, "BTCUSDT", 100, 1, False), received_at=2_000)
         engine.process_trade(TradeEvent(48_000, "BTCUSDT", 100.5, 1, False), received_at=48_000)
 
-        self.assertIsNone(engine.summary()["open_position"])
+        self.assertIsNotNone(engine.summary()["open_position"])
         closed = engine.details()["paper"]["closed_positions"]
-        self.assertEqual(closed[-1]["exit_reason"], "no_followthrough")
+        self.assertFalse(any(position["exit_reason"] == "no_followthrough" for position in closed))
 
     def test_ignores_other_symbols(self):
         engine = PaperTradingEngine(symbol="BTCUSDT", equity=10_000)
@@ -267,6 +267,49 @@ class PaperTradingEngineTests(unittest.TestCase):
 
         self.assertEqual(summary["delta_30s"], -3)
         self.assertEqual(summary["delta_60s"], 97)
+
+    def test_current_atr_uses_max_of_1m_and_3m(self):
+        engine = PaperTradingEngine(symbol="BTCUSDT", equity=10_000)
+        engine._atr_1m.latest_atr = 2.0
+        engine._atr_3m.latest_atr = 5.0
+
+        self.assertEqual(engine._current_atr(100.0), 5.0)
+
+    def test_max_holding_reduces_target_instead_of_closing(self):
+        signal = TradeSignal(
+            id="sig-target-reduce",
+            symbol="BTCUSDT",
+            side=SignalSide.LONG,
+            setup="test_target_reduce",
+            entry_price=100,
+            stop_price=90,
+            target_price=150,
+            target_r_multiple=5.0,
+            confidence=0.8,
+            reasons=("test",),
+            invalidation_rules=("stop"),
+            created_at=1_000,
+        )
+        engine = PaperTradingEngine(
+            symbol="BTCUSDT",
+            equity=10_000,
+            signal_cooldown_ms=0,
+            execution_config=PaperExecutionConfig(limit_entry_pullback_bps=0.0, max_holding_ms=10_000),
+        )
+        engine.signals = OneShotSignalEngine(signal)
+
+        engine.process_trade(TradeEvent(1_000, "BTCUSDT", 100, 1, False), received_at=1_000)
+        engine.process_trade(TradeEvent(2_000, "BTCUSDT", 100, 1, True), received_at=2_000)
+        engine.process_trade(TradeEvent(12_000, "BTCUSDT", 101, 1, False), received_at=12_000)
+
+        position = engine.summary()["open_position"]
+        self.assertIsNotNone(position)
+        self.assertEqual(position["target_price"], 140)
+        self.assertEqual(position["target_r_multiple"], 4.0)
+        self.assertEqual(len(engine.details()["paper"]["closed_positions"]), 0)
+        self.assertTrue(
+            any(action["action"] == "max_holding_target_reduce" for action in engine.details()["paper"]["protective_actions"])
+        )
 
     def test_profile_window_uses_rolling_time_not_all_seen_trades(self):
         engine = PaperTradingEngine(symbol="BTCUSDT", equity=10_000, signal_cooldown_ms=0)
@@ -549,7 +592,7 @@ class PaperTradingEngineTests(unittest.TestCase):
         self.assertEqual(summary["open_position"]["target_price"], 130)
         self.assertEqual(len(engine.details()["paper"]["closed_positions"]), 0)
 
-    def test_paper_engine_moves_long_stop_after_three_complete_bullish_1m_bars(self):
+    def test_paper_engine_moves_long_stop_after_supported_bearish_pullback(self):
         signal = TradeSignal(
             id="sig-1m-stop-long",
             symbol="BTCUSDT",
@@ -580,19 +623,23 @@ class PaperTradingEngineTests(unittest.TestCase):
             TradeEvent(150_000, "BTCUSDT", 108, 1, False),
             TradeEvent(180_000, "BTCUSDT", 108, 1, False),
             TradeEvent(210_000, "BTCUSDT", 112, 1, False),
-            TradeEvent(240_000, "BTCUSDT", 113, 1, False),
+            TradeEvent(240_000, "BTCUSDT", 112, 1, False),
+            TradeEvent(270_000, "BTCUSDT", 113, 1, False),
+            TradeEvent(280_000, "BTCUSDT", 106, 1, True),
+            TradeEvent(290_000, "BTCUSDT", 110, 1, True),
+            TradeEvent(300_000, "BTCUSDT", 111, 1, False),
         ]:
             engine.process_trade(event, received_at=event.timestamp)
 
         position = engine.summary()["open_position"]
 
         self.assertIsNotNone(position)
-        self.assertEqual(position["stop_price"], 104)
+        self.assertEqual(position["stop_price"], 100)
         self.assertTrue(
             any(action["action"] == "kline_momentum_stop_shift" for action in engine.summary()["protective_actions"])
         )
 
-    def test_orderflow_invalidation_can_exit_without_minimum_hold_time(self):
+    def test_orderflow_invalidation_does_not_auto_close_position(self):
         signal = TradeSignal(
             id="sig-orderflow-exit",
             symbol="BTCUSDT",
@@ -618,10 +665,10 @@ class PaperTradingEngineTests(unittest.TestCase):
         engine.process_trade(TradeEvent(2_000, "BTCUSDT", 100, 1, True), received_at=2_000)
         engine.process_trade(TradeEvent(2_100, "BTCUSDT", 99.8, 50, True), received_at=2_100)
 
-        closed = engine.details()["paper"]["closed_positions"][-1]
-        self.assertIsNone(engine.summary()["open_position"])
-        self.assertEqual(closed["exit_reason"], "orderflow_invalidation")
-        self.assertLess(closed["timestamp"] - closed["opened_at"], 2_000)
+        self.assertIsNotNone(engine.summary()["open_position"])
+        self.assertFalse(
+            any(position["exit_reason"] == "orderflow_invalidation" for position in engine.details()["paper"]["closed_positions"])
+        )
 
 
 if __name__ == "__main__":

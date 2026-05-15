@@ -7,7 +7,7 @@ from crypto_perp_tool.config import RiskSettings, Settings, default_settings
 from crypto_perp_tool.journal import JsonlJournal
 
 
-_RISK_KEYS = {"risk_per_trade", "daily_loss_limit", "max_consecutive_losses", "max_leverage", "max_symbol_notional"}
+_RISK_KEYS = {"risk_per_trade", "max_leverage", "max_symbol_notional"}
 _STORE_KEYS = {"equity", "cooldown_ms", "flash_atr_mult", "flash_pct"}
 _STRATEGY_KEYS = {
     "reward_risk",
@@ -28,16 +28,6 @@ def _validate_risk_setting(key: str, value: float | int) -> tuple[float | int | 
         v = float(value)
         if not (0.0001 <= v <= 0.05):
             return None, f"{key} must be 0.0001–0.05 (0.01%–5%)"
-        return v, None
-    if key in ("daily_loss_limit",):
-        v = float(value)
-        if not (0.001 <= v <= 0.10):
-            return None, f"{key} must be 0.001–0.10 (0.1%–10%)"
-        return v, None
-    if key in ("max_consecutive_losses",):
-        v = int(value)
-        if not (1 <= v <= 20):
-            return None, f"{key} must be 1–20"
         return v, None
     if key in ("max_leverage",):
         v = int(value)
@@ -142,7 +132,7 @@ class TradingService:
         else:
             try:
                 value = float(raw_value)
-                if key in ("max_consecutive_losses", "max_leverage", "cooldown_ms"):
+                if key in ("max_leverage", "cooldown_ms"):
                     value = int(value)
             except ValueError:
                 return f"invalid value: {raw_value}"

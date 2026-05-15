@@ -232,7 +232,7 @@ class ReplayEngine:
                 ask_price=ask,
                 spread_bps=spread,
                 vwap=last_vwap,
-                atr_1m_14=atr_1m.latest_atr or max(event.price * 0.002, self.bin_size / 2),
+                atr_1m_14=max(atr_1m.latest_atr, atr_3m.latest_atr) or max(event.price * 0.002, self.bin_size / 2),
                 delta_15s=delta_15s,
                 delta_30s=delta_30s,
                 delta_60s=delta_60s,

@@ -43,7 +43,7 @@ class PaperPosition:
 
 
 class PaperRunner:
-    def __init__(self, equity: float, journal_path: Path | str, trade_log_path: Path | str | None = None, taker_fee_rate: float = 0.0004) -> None:
+    def __init__(self, equity: float, journal_path: Path | str, trade_log_path: Path | str | None = None, taker_fee_rate: float = 0.00018) -> None:
         self.settings = default_settings()
         self.equity = equity
         self.journal = JsonlJournal(journal_path, config_version=self.settings.config_version)
@@ -127,7 +127,7 @@ class PaperRunner:
             self.journal.write("signal", {"signal": signal})
             decision = self.risk.evaluate(
                 signal,
-                AccountState(equity=self.equity, realized_pnl_today=0, consecutive_losses=0),
+                AccountState(equity=self.equity),
             )
             self.journal.write("risk_decision", {"decision": decision})
             if decision.allowed:

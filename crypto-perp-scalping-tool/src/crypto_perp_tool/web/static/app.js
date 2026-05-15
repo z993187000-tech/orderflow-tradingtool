@@ -105,6 +105,7 @@ const priceView = {
   dragStartX: 0,
   dragStartMinTs: null,
   dragStartMaxTs: null,
+  klineInterval: "5m",
   selectedMarkerKey: null,
   markerHitboxes: []
 };
@@ -327,12 +328,14 @@ function recordRow(kind, record) {
 
 function renderPriceChart() {
   if (!latestDashboard) return;
+  const selectedKlines = (latestDashboard.klines || [])
+    .filter(kline => kline.interval === priceView.klineInterval || (!kline.interval && priceView.klineInterval === "5m"));
   drawPrice(
     els.priceCanvas,
     latestDashboard.trades,
     latestDashboard.markers,
     latestDashboard.profile_levels,
-    latestDashboard.klines
+    selectedKlines
   );
 }
 
@@ -840,6 +843,26 @@ function bindPriceCanvasInteractions() {
   window.addEventListener("mouseup", endPriceDrag);
 }
 
+function bindKlineIntervalControls() {
+  document.querySelectorAll("[data-kline-interval]").forEach(button => {
+    button.addEventListener("click", () => {
+      const interval = button.dataset.klineInterval;
+      if (!interval || interval === priceView.klineInterval) return;
+      priceView.klineInterval = interval;
+      resetPriceView(false);
+      syncKlineIntervalControls();
+      renderPriceChart();
+    });
+  });
+  syncKlineIntervalControls();
+}
+
+function syncKlineIntervalControls() {
+  document.querySelectorAll("[data-kline-interval]").forEach(button => {
+    button.classList.toggle("is-active", button.dataset.klineInterval === priceView.klineInterval);
+  });
+}
+
 function togglePriceMarkerDetail(event) {
   if (priceView.dragMoved) {
     priceView.dragMoved = false;
@@ -1229,6 +1252,7 @@ async function resumeCircuit() {
 
 els.circuitResume.addEventListener("click", resumeCircuit);
 window.addEventListener("resize", loadDashboard);
+bindKlineIntervalControls();
 bindPriceCanvasInteractions();
 loadDashboard();
 setInterval(loadDashboard, REFRESH_INTERVAL_MS);

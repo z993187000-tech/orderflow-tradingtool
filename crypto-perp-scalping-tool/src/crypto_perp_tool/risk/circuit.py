@@ -31,14 +31,13 @@ class CircuitBreaker:
         account_ok: bool = True,
         data_healthy: bool = True,
         positions_reconciled: bool = True,
-        daily_loss_within_limit: bool = True,
     ) -> bool:
         if self.state != "tripped":
             return False
         now_ms = int(time.time() * 1000)
         if self.cooldown_until is not None and now_ms < self.cooldown_until:
             return False
-        return account_ok and data_healthy and positions_reconciled and daily_loss_within_limit
+        return account_ok and data_healthy and positions_reconciled
 
     def resume(self, actor: str) -> dict:
         if self.state != "tripped":

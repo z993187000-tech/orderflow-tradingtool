@@ -7,8 +7,6 @@ from crypto_perp_tool.types import RiskDecision, TradeSignal
 @dataclass(frozen=True)
 class AccountState:
     equity: float
-    realized_pnl_today: float
-    consecutive_losses: int
 
 
 class RiskEngine:
@@ -17,7 +15,7 @@ class RiskEngine:
         self.testing_mode = testing_mode
 
     def evaluate(self, signal: TradeSignal, account: AccountState) -> RiskDecision:
-        reject_reasons = list(self._account_reject_reasons(account))
+        reject_reasons: list[str] = []
         stop_distance = abs(signal.entry_price - signal.stop_price)
         if stop_distance <= 0:
             reject_reasons.append("invalid_stop_distance")
@@ -33,7 +31,7 @@ class RiskEngine:
             allowed=not reject_reasons,
             quantity=quantity,
             max_slippage_bps=self._max_slippage_bps(signal.symbol),
-            remaining_daily_risk=self._remaining_daily_risk(account),
+            remaining_daily_risk=account.equity,
             reject_reasons=tuple(reject_reasons),
         )
 
@@ -43,20 +41,6 @@ class RiskEngine:
         max_notional = equity * self.settings.max_symbol_notional_equity_multiple
         max_quantity = max_notional / entry_price
         return min(raw_quantity, max_quantity)
-
-    def _account_reject_reasons(self, account: AccountState) -> tuple[str, ...]:
-        reasons: list[str] = []
-        if not self.testing_mode:
-            daily_loss_amount = account.equity * self.settings.daily_loss_limit
-            if account.realized_pnl_today <= -daily_loss_amount:
-                reasons.append("daily_loss_limit_reached")
-            if account.consecutive_losses >= self.settings.max_consecutive_losses:
-                reasons.append("max_consecutive_losses_reached")
-        return tuple(reasons)
-
-    def _remaining_daily_risk(self, account: AccountState) -> float:
-        daily_loss_amount = account.equity * self.settings.daily_loss_limit
-        return max(0.0, daily_loss_amount + account.realized_pnl_today)
 
     def _max_slippage_bps(self, symbol: str) -> float:
         if symbol == "BTCUSDT":

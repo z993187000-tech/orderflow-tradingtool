@@ -175,7 +175,7 @@ class BinanceMarketDataTests(unittest.TestCase):
         self.assertEqual(spec.symbol, "BTCUSDT")
         self.assertEqual(spec.tick_size, 0.1)
         self.assertEqual(spec.step_size, 0.001)
-        self.assertEqual(spec.taker_fee_rate, 0.0004)
+        self.assertEqual(spec.taker_fee_rate, 0.00018)
 
     def test_exchange_info_client_uses_usdm_futures_endpoint(self):
         requested = []

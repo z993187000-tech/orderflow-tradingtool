@@ -107,7 +107,14 @@
           <div class="panel chart-panel">
             <div class="panel-head">
               <h2>Price And Execution / 价格与执行</h2>
-              <span id="tradeCount">0 trades</span>
+              <div class="chart-controls">
+                <div class="kline-tabs" aria-label="Kline interval">
+                  <button type="button" data-kline-interval="1m">1m</button>
+                  <button type="button" data-kline-interval="3m">3m</button>
+                  <button type="button" data-kline-interval="5m" class="is-active">5m</button>
+                </div>
+                <span id="tradeCount">0 trades</span>
+              </div>
             </div>
             <canvas id="priceCanvas" width="900" height="360"></canvas>
           </div>
@@ -140,9 +147,9 @@
           <form id="backtestForm" class="panel backtest-form">
             <div class="panel-head">
               <h2>Backtest Run / 回测运行</h2>
-              <span>Server CSV path</span>
+              <span>Server CSV path / 服务器 CSV 路径</span>
             </div>
-            <label>CSV Path
+            <label>CSV Path / CSV 路径
               <input id="backtestCsvPath" type="text" value="data/btcusdt_recent.csv" autocomplete="off">
             </label>
             <label>Symbol

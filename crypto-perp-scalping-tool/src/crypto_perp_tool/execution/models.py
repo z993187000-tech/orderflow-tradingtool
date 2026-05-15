@@ -27,6 +27,7 @@ class PaperOpenPosition:
     trail_stop_price: float | None = None
     max_favorable_move: float = 0.0
     max_adverse_move: float = 0.0
+    max_holding_target_reductions: int = 0
     entry_order_type: str = "limit"
     setup_model: str = ""
     legacy_setup: str = ""
@@ -67,6 +68,6 @@ class PaperExecutionConfig:
     squeeze_break_even_r: float = 1.25
     failed_auction_break_even_r: float = 1.5
     lvn_acceptance_break_even_r: float = 1.5
-    first_structure_reduce_ratio: float = 0.5
+    first_structure_reduce_ratio: float = 0.0
     absorption_reduce_ratio: float = 0.5
-    no_followthrough_seconds: int = 45
+    no_followthrough_seconds: int = 0

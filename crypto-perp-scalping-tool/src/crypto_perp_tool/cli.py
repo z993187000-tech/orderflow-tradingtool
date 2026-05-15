@@ -163,8 +163,6 @@ def main(argv: list[str] | None = None) -> int:
         )
         account = AccountState(
             equity=float(account_payload["equity"]),
-            realized_pnl_today=float(account_payload["realized_pnl_today"]),
-            consecutive_losses=int(account_payload["consecutive_losses"]),
         )
         decision = RiskEngine(default_settings().risk).evaluate(signal, account)
         print(json.dumps(to_jsonable(decision), ensure_ascii=False, indent=2))
