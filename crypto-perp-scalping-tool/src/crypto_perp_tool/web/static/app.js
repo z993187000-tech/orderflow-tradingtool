@@ -40,7 +40,29 @@ const els = {
   detailSubtitle: document.getElementById("detailSubtitle"),
   detailClose: document.getElementById("detailClose"),
   detailBody: document.getElementById("detailBody"),
-  rangeTabs: document.querySelector(".range-tabs")
+  rangeTabs: document.querySelector(".range-tabs"),
+  viewButtons: document.querySelectorAll("[data-view]"),
+  liveView: document.getElementById("liveView"),
+  backtestView: document.getElementById("backtestView"),
+  backtestForm: document.getElementById("backtestForm"),
+  backtestCsvPath: document.getElementById("backtestCsvPath"),
+  backtestSymbol: document.getElementById("backtestSymbol"),
+  backtestEquity: document.getElementById("backtestEquity"),
+  backtestEntrySlippage: document.getElementById("backtestEntrySlippage"),
+  backtestExitSlippage: document.getElementById("backtestExitSlippage"),
+  backtestFee: document.getElementById("backtestFee"),
+  backtestSplit: document.getElementById("backtestSplit"),
+  backtestStart: document.getElementById("backtestStart"),
+  backtestEnd: document.getElementById("backtestEnd"),
+  backtestRunButton: document.getElementById("backtestRunButton"),
+  backtestStatus: document.getElementById("backtestStatus"),
+  backtestReport: document.getElementById("backtestReport"),
+  backtestMetricGrid: document.getElementById("backtestMetricGrid"),
+  backtestEquityCanvas: document.getElementById("backtestEquityCanvas"),
+  backtestSetupBody: document.getElementById("backtestSetupBody"),
+  backtestTradeBody: document.getElementById("backtestTradeBody"),
+  backtestMeta: document.getElementById("backtestMeta"),
+  backtestErrors: document.getElementById("backtestErrors")
 };
 
 const colors = {
@@ -57,6 +79,7 @@ const LARGE_TAPE_MIN_QTY = 20;
 const PROFILE_OVERLAY_WIDTH = 96;
 const PRICE_MIN_VISIBLE_RATIO = 0.02;
 const PRICE_MIN_VISIBLE_MS = 1000;
+const PRICE_MARKER_HIT_RADIUS = 16;
 const modeLabels = {
   paper: "Paper / 模拟",
   live: "Live / 实盘"
@@ -70,6 +93,7 @@ const detailConfig = {
 
 let latestDashboard = null;
 let isLoading = false;
+let activeView = "live";
 let activeDetail = "signals";
 let activeRange = "24h";
 const priceView = {
@@ -77,12 +101,16 @@ const priceView = {
   maxTs: null,
   isCustom: false,
   dragging: false,
+  dragMoved: false,
   dragStartX: 0,
   dragStartMinTs: null,
-  dragStartMaxTs: null
+  dragStartMaxTs: null,
+  selectedMarkerKey: null,
+  markerHitboxes: []
 };
 
 async function loadDashboard() {
+  if (activeView !== "live") return;
   if (isLoading) return;
   isLoading = true;
   try {
@@ -310,6 +338,7 @@ function renderPriceChart() {
 
 function drawPrice(canvas, trades, markers, profileLevels, klines) {
   const ctx = setupCanvas(canvas);
+  priceView.markerHitboxes = [];
   const safeTrades = Array.isArray(trades) ? trades : [];
   const safeKlines = Array.isArray(klines) ? klines : [];
   const hasPriceData = safeTrades.length || (safeKlines && safeKlines.length);
@@ -342,7 +371,7 @@ function drawPrice(canvas, trades, markers, profileLevels, klines) {
   drawVolumeProfileOverlay(ctx, canvas, scale, selectedProfileLevels);
 
   if (safeKlines.length) {
-    drawKlines(ctx, visibleKlines, scale, chartRight);
+    drawKlines(ctx, visibleKlines, scale, chartRight, minTs, maxTs);
   } else {
     ctx.strokeStyle = colors.price;
     ctx.lineWidth = 2;
@@ -361,22 +390,67 @@ function drawPrice(canvas, trades, markers, profileLevels, klines) {
     const markerTs = marker.timestamp || 0;
     const x = scale.x(markerTs);
     const y = scale.y(Number(marker.price));
+    const markerKey = priceMarkerKey(marker);
+    const isSelected = markerKey === priceView.selectedMarkerKey;
     if (marker.type === "aggression_bubble") {
-      drawAggressionBubble(ctx, marker, x, y, canvas);
+      const radius = aggressionBubbleRadius(marker);
+      priceView.markerHitboxes.push({ key: markerKey, x, y, radius: Math.max(radius + 4, PRICE_MARKER_HIT_RADIUS) });
+      drawAggressionBubble(ctx, marker, x, y, canvas, isSelected);
+      if (isSelected) drawMarkerDetail(ctx, marker, x + radius + 6, y - radius, canvas, placedLabels);
       return;
     }
     ctx.fillStyle = marker.type === "signal" ? colors.warn : colors.buy;
     ctx.beginPath();
     ctx.arc(x, y, 5, 0, Math.PI * 2);
     ctx.fill();
-    ctx.fillStyle = colors.text;
-    let labelY = Math.max(y - 8, 14);
-    for (const placed of placedLabels) {
-      if (Math.abs(labelY - placed) < 14) labelY = placed + 14;
-    }
-    placedLabels.push(labelY);
-    ctx.fillText(marker.label || marker.type, Math.min(x + 8, chartRight - 90), labelY);
+    priceView.markerHitboxes.push({ key: markerKey, x, y, radius: PRICE_MARKER_HIT_RADIUS });
+    if (isSelected) drawMarkerDetail(ctx, marker, x + 8, y - 8, canvas, placedLabels);
   });
+}
+
+function priceMarkerKey(marker) {
+  return [
+    marker.type || "marker",
+    marker.timestamp || 0,
+    marker.price || 0,
+    marker.label || "",
+    marker.side || "",
+    marker.quantity || ""
+  ].join("|");
+}
+
+function markerDetailText(marker) {
+  const parts = [marker.label || marker.type || "marker"];
+  if (marker.side) parts.push(String(marker.side).toUpperCase());
+  if (marker.quantity !== undefined) parts.push(`Qty ${formatNumber(marker.quantity)}`);
+  if (marker.price !== undefined) parts.push(`@ ${formatNumber(marker.price)}`);
+  return parts.join(" ");
+}
+
+function drawMarkerDetail(ctx, marker, x, y, canvas, placedLabels) {
+  const text = markerDetailText(marker);
+  const paddingX = 7;
+  const paddingY = 5;
+  ctx.save();
+  ctx.font = "11px Segoe UI, Arial";
+  const width = Math.min(canvas.width - 16, ctx.measureText(text).width + paddingX * 2);
+  const height = 22;
+  let labelX = Math.min(Math.max(54, x), canvas.width - width - 8);
+  let labelY = Math.min(Math.max(8, y), canvas.height - height - 8);
+  for (const placed of placedLabels) {
+    if (Math.abs(labelY - placed) < height) labelY = Math.min(canvas.height - height - 8, placed + height + 2);
+  }
+  placedLabels.push(labelY);
+  ctx.fillStyle = "rgba(18, 18, 18, 0.86)";
+  ctx.strokeStyle = "rgba(170, 166, 155, 0.32)";
+  ctx.lineWidth = 1;
+  ctx.fillRect(labelX, labelY, width, height);
+  ctx.strokeRect(labelX, labelY, width, height);
+  ctx.fillStyle = colors.text;
+  ctx.textBaseline = "middle";
+  ctx.textAlign = "left";
+  ctx.fillText(text, labelX + paddingX, labelY + height / 2, width - paddingX * 2);
+  ctx.restore();
 }
 
 function priceDataTimeRange(trades, klines) {
@@ -462,14 +536,20 @@ function visibleKlinesForTimeRange(klines, minTs, maxTs) {
   return [before, ...visible, after].filter(Boolean);
 }
 
-function drawKlines(ctx, klines, scale, chartRight) {
+function drawKlines(ctx, klines, scale, chartRight, minTs, maxTs) {
   const candleCount = klines.length;
   if (!candleCount) return;
-  const slotWidth = (chartRight - 50) / candleCount;
-  const candleWidth = Math.max(1, Math.min(slotWidth * 0.7, 12));
+  const plotWidth = Math.max(1, chartRight - 100);
+  const fallbackSlotWidth = plotWidth / Math.max(candleCount, 1);
+  const fallbackDuration = inferredKlineDurationMs(klines, Math.max(1, maxTs - minTs));
 
   for (const k of klines) {
-    const x = scale.x(k.timestamp);
+    const start = Number(k.timestamp);
+    const duration = klineDurationMs(k, fallbackDuration);
+    const timeWidth = Math.abs(scale.x(start + duration) - scale.x(start));
+    const candleWidth = Math.max(2, Math.min((timeWidth || fallbackSlotWidth) * 0.82, fallbackSlotWidth * 0.92));
+    const centerTs = k.is_closed ? start + duration / 2 : Math.min(start + duration / 2, Math.max(start, maxTs));
+    const x = scale.x(centerTs);
     const openY = scale.y(k.open);
     const closeY = scale.y(k.close);
     const highY = scale.y(k.high);
@@ -491,6 +571,27 @@ function drawKlines(ctx, klines, scale, chartRight) {
     ctx.fillRect(x - candleWidth / 2, bodyTop, candleWidth, bodyHeight);
     ctx.globalAlpha = 1;
   }
+}
+
+function klineDurationMs(kline, fallbackDuration) {
+  const start = Number(kline.timestamp);
+  const close = Number(kline.close_time);
+  if (Number.isFinite(start) && Number.isFinite(close) && close > start) return close - start + 1;
+  return fallbackDuration;
+}
+
+function inferredKlineDurationMs(klines, visibleSpan) {
+  const starts = (klines || [])
+    .map(kline => Number(kline.timestamp))
+    .filter(Number.isFinite)
+    .sort((a, b) => a - b);
+  const diffs = [];
+  for (let index = 1; index < starts.length; index += 1) {
+    const diff = starts[index] - starts[index - 1];
+    if (diff > 0) diffs.push(diff);
+  }
+  if (diffs.length) return diffs[Math.floor(diffs.length / 2)];
+  return Math.max(1, visibleSpan);
 }
 
 function latestProfileLevels(profileLevels) {
@@ -547,9 +648,13 @@ function drawTimeAxis(ctx, canvas, scale, minTs, maxTs) {
   }
 }
 
-function drawAggressionBubble(ctx, marker, x, y, canvas) {
+function aggressionBubbleRadius(marker) {
   const quantity = Math.max(0, Number(marker.quantity) || 0);
-  const radius = Math.min(marker.tier === "block" ? 22 : 16, Math.max(6, Math.sqrt(marker.quantity || quantity) * 1.8));
+  return Math.min(marker.tier === "block" ? 22 : 16, Math.max(6, Math.sqrt(quantity) * 1.8));
+}
+
+function drawAggressionBubble(ctx, marker, x, y, canvas, showDetail) {
+  const radius = aggressionBubbleRadius(marker);
   const color = marker.side === "sell" ? colors.sell : colors.buy;
   ctx.save();
   ctx.globalAlpha = 0.28;
@@ -562,8 +667,16 @@ function drawAggressionBubble(ctx, marker, x, y, canvas) {
   ctx.lineWidth = marker.tier === "block" ? 3 : 2;
   ctx.stroke();
   ctx.restore();
-  ctx.fillStyle = colors.text;
-  ctx.fillText(marker.label || "aggression_bubble", Math.min(x + radius + 6, canvas.width - 150), Math.max(y - radius, 14));
+  if (showDetail) {
+    ctx.save();
+    ctx.strokeStyle = colors.text;
+    ctx.globalAlpha = 0.45;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.arc(x, y, radius + 4, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+  }
 }
 
 function drawVolumeProfileOverlay(ctx, canvas, scale, profileLevels) {
@@ -698,10 +811,15 @@ function bindPriceCanvasInteractions() {
     const range = currentVisiblePriceRange();
     if (!range) return;
     priceView.dragging = true;
+    priceView.dragMoved = false;
     priceView.dragStartX = event.clientX;
     priceView.dragStartMinTs = range.minTs;
     priceView.dragStartMaxTs = range.maxTs;
     canvas.classList.add("is-dragging");
+  });
+  canvas.addEventListener("click", event => {
+    if (event.button !== 0) return;
+    togglePriceMarkerDetail(event);
   });
   canvas.addEventListener("dblclick", event => {
     event.preventDefault();
@@ -710,13 +828,48 @@ function bindPriceCanvasInteractions() {
   window.addEventListener("mousemove", event => {
     if (!priceView.dragging) return;
     const span = priceView.dragStartMaxTs - priceView.dragStartMinTs;
-    const deltaMs = -((event.clientX - priceView.dragStartX) / pricePlotWidth(canvas)) * span;
+    const deltaX = event.clientX - priceView.dragStartX;
+    if (Math.abs(deltaX) <= 3) return;
+    priceView.dragMoved = true;
+    const deltaMs = -(deltaX / pricePlotWidth(canvas)) * span;
     panPriceView(deltaMs, {
       minTs: priceView.dragStartMinTs,
       maxTs: priceView.dragStartMaxTs
     });
   });
   window.addEventListener("mouseup", endPriceDrag);
+}
+
+function togglePriceMarkerDetail(event) {
+  if (priceView.dragMoved) {
+    priceView.dragMoved = false;
+    return;
+  }
+  const hit = hitPriceMarker(event, els.priceCanvas);
+  const nextKey = hit && priceView.selectedMarkerKey !== hit.key ? hit.key : null;
+  if (priceView.selectedMarkerKey === nextKey) return;
+  priceView.selectedMarkerKey = nextKey;
+  renderPriceChart();
+}
+
+function hitPriceMarker(event, canvas) {
+  const point = priceCanvasPoint(event, canvas);
+  for (let index = priceView.markerHitboxes.length - 1; index >= 0; index -= 1) {
+    const hitbox = priceView.markerHitboxes[index];
+    const distance = Math.hypot(point.x - hitbox.x, point.y - hitbox.y);
+    if (distance <= hitbox.radius) return hitbox;
+  }
+  return null;
+}
+
+function priceCanvasPoint(event, canvas) {
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = canvas.width / Math.max(1, rect.width);
+  const scaleY = canvas.height / Math.max(1, rect.height);
+  return {
+    x: (event.clientX - rect.left) * scaleX,
+    y: (event.clientY - rect.top) * scaleY
+  };
 }
 
 function currentFullPriceRange() {
@@ -759,6 +912,7 @@ function resetPriceView(redraw = true) {
   priceView.minTs = null;
   priceView.maxTs = null;
   priceView.isCustom = false;
+  priceView.selectedMarkerKey = null;
   if (redraw) renderPriceChart();
 }
 
@@ -809,6 +963,181 @@ function emptyDetail() {
   };
 }
 
+function switchView(view) {
+  activeView = view === "backtest" ? "backtest" : "live";
+  els.liveView.classList.toggle("is-hidden", activeView !== "live");
+  els.backtestView.classList.toggle("is-hidden", activeView !== "backtest");
+  els.viewButtons.forEach(button => {
+    button.classList.toggle("is-active", button.dataset.view === activeView);
+  });
+  if (activeView === "live") loadDashboard();
+}
+
+function backtestFormPayload() {
+  return {
+    csv_path: els.backtestCsvPath.value.trim(),
+    symbol: els.backtestSymbol.value,
+    equity: numberOrDefault(els.backtestEquity, 10000),
+    entry_slippage_bps: numberOrDefault(els.backtestEntrySlippage, 2.0),
+    exit_slippage_bps: numberOrDefault(els.backtestExitSlippage, 3.0),
+    fee_bps: numberOrDefault(els.backtestFee, 4.0),
+    start_ms: numberOrNull(els.backtestStart),
+    end_ms: numberOrNull(els.backtestEnd),
+    split: numberOrDefault(els.backtestSplit, 0.0)
+  };
+}
+
+function numberOrDefault(element, fallback) {
+  const value = Number(element.value);
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function numberOrNull(element) {
+  if (!element.value.trim()) return null;
+  const value = Number(element.value);
+  return Number.isFinite(value) ? value : null;
+}
+
+async function runBacktest(event) {
+  event.preventDefault();
+  els.backtestRunButton.disabled = true;
+  els.backtestStatus.textContent = "Running";
+  renderBacktestError("");
+  try {
+    const response = await fetch("/api/backtest/run", {
+      method: "POST",
+      cache: "no-store",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(backtestFormPayload())
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || `Backtest API returned ${response.status}`);
+    renderBacktestReport(payload);
+    els.backtestStatus.textContent = "Complete";
+  } catch (error) {
+    renderBacktestError(error.message);
+    els.backtestStatus.textContent = "Error";
+  } finally {
+    els.backtestRunButton.disabled = false;
+  }
+}
+
+function renderBacktestReport(payload) {
+  els.backtestReport.classList.remove("is-empty");
+  renderBacktestError("");
+  if (payload.mode === "split") {
+    renderBacktestSplitReport(payload);
+    return;
+  }
+  renderBacktestSingleReport(payload, "Single Run");
+}
+
+function renderBacktestSplitReport(payload) {
+  const isResult = payload.in_sample || {};
+  const oosResult = payload.out_of_sample || {};
+  const isReport = isResult.report || {};
+  const oosReport = oosResult.report || {};
+  els.backtestMeta.textContent = `${payload.symbol || "--"} split / WFE ${formatNumber(payload.walk_forward_efficiency)}`;
+  els.backtestMetricGrid.innerHTML = [
+    backtestMetricCard("IS Return", formatSignedPercent(isResult.total_return_pct)),
+    backtestMetricCard("OOS Return", formatSignedPercent(oosResult.total_return_pct)),
+    backtestMetricCard("IS Net PnL", formatNumber(isReport.net_pnl)),
+    backtestMetricCard("OOS Net PnL", formatNumber(oosReport.net_pnl)),
+    backtestMetricCard("OOS PF", formatNumber(oosReport.profit_factor)),
+    backtestMetricCard("OOS Max DD", formatNumber(oosReport.max_drawdown))
+  ].join("");
+  drawBacktestEquityCurve(oosResult.equity_curve || []);
+  renderBacktestSetupRows(oosReport.by_setup || {});
+  renderBacktestTradeRows(oosResult.trade_records || []);
+  renderBacktestResultErrors([...(isResult.errors || []), ...(oosResult.errors || [])]);
+}
+
+function renderBacktestSingleReport(result, label) {
+  const report = result.report || {};
+  els.backtestMeta.textContent = `${label} / ${result.symbol || "--"} / ${formatNumber(result.total_events)} events / ${result.config_version || "no config version"}`;
+  els.backtestMetricGrid.innerHTML = [
+    backtestMetricCard("Return", formatSignedPercent(result.total_return_pct)),
+    backtestMetricCard("Net PnL", formatNumber(report.net_pnl)),
+    backtestMetricCard("Win Rate", formatPercentRate(report.win_rate)),
+    backtestMetricCard("Profit Factor", formatNumber(report.profit_factor)),
+    backtestMetricCard("Max Drawdown", formatNumber(report.max_drawdown)),
+    backtestMetricCard("Trades", formatNumber(report.total_trades))
+  ].join("");
+  drawBacktestEquityCurve(result.equity_curve || []);
+  renderBacktestSetupRows(report.by_setup || {});
+  renderBacktestTradeRows(result.trade_records || []);
+  renderBacktestResultErrors(result.errors || []);
+}
+
+function backtestMetricCard(label, value) {
+  return `<div class="backtest-metric"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`;
+}
+
+function renderBacktestSetupRows(bySetup) {
+  const rows = Object.entries(bySetup).map(([setup, stats]) => `<tr>
+    <td>${escapeHtml(setup)}</td>
+    <td>${formatNumber(stats.signals)}</td>
+    <td>${formatNumber(stats.trades)}</td>
+    <td>${formatNumber(stats.wins)}</td>
+    <td class="${Number(stats.net_pnl) >= 0 ? "buy" : "sell"}">${formatNumber(stats.net_pnl)}</td>
+  </tr>`);
+  els.backtestSetupBody.innerHTML = rows.length ? rows.join("") : `<tr><td colspan="5">No setup data</td></tr>`;
+}
+
+function renderBacktestTradeRows(records) {
+  const rows = records.slice(-12).reverse().map(record => `<tr>
+    <td>${formatTimestamp(record.exit_time)}</td>
+    <td>${escapeHtml(record.side || "--")}</td>
+    <td>${formatNumber(record.entry_price)}</td>
+    <td>${formatNumber(record.exit_price)}</td>
+    <td class="${Number(record.net_pnl) >= 0 ? "buy" : "sell"}">${formatNumber(record.net_pnl)}</td>
+    <td>${formatNumber(record.r_multiple)}</td>
+  </tr>`);
+  els.backtestTradeBody.innerHTML = rows.length ? rows.join("") : `<tr><td colspan="6">No closed trades</td></tr>`;
+}
+
+function renderBacktestResultErrors(errors) {
+  renderBacktestError((errors || []).join(" / "));
+}
+
+function renderBacktestError(message) {
+  els.backtestErrors.textContent = message || "";
+  els.backtestErrors.classList.toggle("is-hidden", !message);
+}
+
+function drawBacktestEquityCurve(values) {
+  const canvas = els.backtestEquityCanvas;
+  const ctx = setupCanvas(canvas);
+  const points = (values || []).map(Number).filter(Number.isFinite);
+  if (!points.length) return;
+  const scale = makeScale(points, canvas.width, canvas.height, 24);
+  drawGrid(ctx, canvas);
+  ctx.strokeStyle = points[points.length - 1] >= points[0] ? colors.buy : colors.sell;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  points.forEach((value, index) => {
+    const x = scale.x(index, points.length);
+    const y = scale.y(value);
+    if (index === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+}
+
+function formatPercentRate(value) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return "--";
+  return (Number(value) * 100).toFixed(2) + "%";
+}
+
+function escapeHtml(value) {
+  return String(value ?? "--")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 function formatTimestamp(value) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return "--";
   const number = Number(value);
@@ -848,6 +1177,10 @@ function formatSignedPercent(value) {
   return sign + num.toFixed(2) + "%";
 }
 
+els.viewButtons.forEach(button => {
+  button.addEventListener("click", () => switchView(button.dataset.view));
+});
+els.backtestForm.addEventListener("submit", runBacktest);
 els.refresh.addEventListener("click", loadDashboard);
 els.symbol.addEventListener("change", () => {
   resetPriceView(false);

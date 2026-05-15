@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import math
+import re
 import time
 from collections import defaultdict
+from dataclasses import replace
 
 from crypto_perp_tool.types import ProfileLevel, ProfileLevelType
+
+_ROLLING_MINUTES_RE = re.compile(r"^rolling_(\d+)m$")
 
 
 def _utc_midnight_ms() -> int:
@@ -66,6 +70,9 @@ class VolumeProfileEngine:
             return _utc_midnight_ms()
         if window == "rolling_4h":
             return now_ms - 4 * 3600 * 1000
+        match = _ROLLING_MINUTES_RE.match(window)
+        if match:
+            return now_ms - int(match.group(1)) * 60 * 1000
         return 0
 
     def _volume_by_bin(self, window: str) -> dict[float, float]:
@@ -152,3 +159,28 @@ class VolumeProfileEngine:
             included.add(price)
             included_volume += volumes[price]
         return min(included), max(included)
+
+
+def build_profile_levels(
+    trades: list[tuple[float, float, int]],
+    *,
+    timestamp: int,
+    window_ms: int,
+    label: str,
+    bin_size: float,
+    value_area_ratio: float,
+    min_trades: int = 0,
+    min_bins: int = 0,
+) -> tuple[ProfileLevel, ...]:
+    window_trades = [(price, quantity, ts) for price, quantity, ts in trades if 0 <= timestamp - ts <= window_ms]
+    if len(window_trades) < min_trades:
+        return ()
+
+    profile = VolumeProfileEngine(bin_size=bin_size, value_area_ratio=value_area_ratio)
+    for price, quantity, ts in window_trades:
+        profile.add_trade(price, quantity, timestamp=ts)
+
+    if min_bins > 0 and len(profile._volume_by_bin("all")) < min_bins:
+        return ()
+
+    return tuple(replace(level, window=label) for level in profile.levels(window="all"))

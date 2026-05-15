@@ -14,6 +14,10 @@
           <h1>Order Flow Dashboard <span>订单流盘面</span></h1>
         </div>
         <div class="controls">
+          <div class="view-tabs" aria-label="Dashboard view">
+            <button type="button" data-view="live" class="is-active">Live</button>
+            <button type="button" data-view="backtest">Backtest</button>
+          </div>
           <select id="symbolSelect" aria-label="Symbol">
             <option value="BTCUSDT">BTCUSDT</option>
             <option value="ETHUSDT">ETHUSDT</option>
@@ -23,109 +27,190 @@
         </div>
       </header>
 
-      <section class="metrics" aria-label="Summary">
-        <div class="metric-card" title="优先显示 Binance USDⓈ-M Futures aggTrade 最新成交价；下方保留标记价、指数价、盘口中间价和现货参考价"><span>Perp Last / 永续最新成交价</span><strong id="lastPrice">--</strong><small id="lastPriceMeta">Perp -- / Mark -- / Index -- / Mid -- / Spot --</small></div>
-        <div class="metric-card" title="主动买入成交量减主动卖出成交量的累计值"><span>Cum Delta / 累计Delta</span><strong id="cumDelta">--</strong></div>
-        <button class="metric-card metric-action" type="button" data-detail="signals" title="查看模拟和实盘信号明细">
-          <span>Signals / 信号数</span><strong id="signals">--</strong><small id="signalsSplit">模拟 -- / 实盘 --</small>
-        </button>
-        <button class="metric-card metric-action" type="button" data-detail="orders" title="查看模拟和实盘订单明细">
-          <span>Orders / 订单数</span><strong id="orders">--</strong><small id="ordersSplit">模拟 -- / 实盘 --</small>
-        </button>
-        <button class="metric-card metric-action" type="button" data-detail="closed_positions" title="查看模拟和实盘平仓明细">
-          <span>Closed / 平仓数</span><strong id="closed">--</strong><small id="closedSplit">模拟 -- / 实盘 --</small>
-        </button>
-        <button class="metric-card metric-action" type="button" data-detail="pnl" title="已实现盈亏（含费率），括号内为收益率">
-          <span>24h PnL / 24h盈亏</span><strong id="pnl">--</strong><small id="pnlSplit">模拟 -- / 实盘 --</small>
-        </button>
-        <div class="metric-card" title="当前模拟持仓，含方向、数量、入场、止损和止盈"><span>Position / 当前持仓</span><strong id="currentPosition">flat</strong><small id="currentPositionMeta">无持仓</small></div>
-        <div class="metric-card" title="最近一次信号触发原因"><span>Signal Reasons / 信号原因</span><strong id="signalReasons">--</strong></div>
-        <div class="metric-card" title="最近一次拒绝信号或拒绝下单原因"><span>Reject Reasons / 拒绝原因</span><strong id="rejectReasons">--</strong></div>
-        <div class="metric-card" title="本地接收时间减交易所事件时间；主要用于判断交易所事件到达本机的延迟"><span>Exchange Lag / 交易所延迟</span><strong id="dataLag">--</strong></div>
-        <div class="metric-card" title="当前时间减最近一次本地收到成交的时间；主要用于判断 WebSocket 是否还在推送"><span>Stream Freshness / 流新鲜度</span><strong id="streamFreshness">--</strong></div>
-        <div class="metric-card" title="最近一笔 Binance aggTrade 事件时间"><span>Last Trade / 最近成交时间</span><strong id="lastTradeTime">--</strong></div>
-        <div class="metric-card" title="行情 WebSocket 或回放数据源状态"><span>Connection / 连接状态</span><strong id="connection">--</strong></div>
-      </section>
+      <div id="liveView" class="view-pane">
+        <section class="metrics" aria-label="Summary">
+          <div class="metric-card" title="优先显示 Binance USDⓈ-M Futures aggTrade 最新成交价；下方保留标记价、指数价、盘口中间价和现货参考价"><span>Perp Last / 永续最新成交价</span><strong id="lastPrice">--</strong><small id="lastPriceMeta">Perp -- / Mark -- / Index -- / Mid -- / Spot --</small></div>
+          <div class="metric-card" title="主动买入成交量减主动卖出成交量的累计值"><span>Cum Delta / 累计Delta</span><strong id="cumDelta">--</strong></div>
+          <button class="metric-card metric-action" type="button" data-detail="signals" title="查看模拟和实盘信号明细">
+            <span>Signals / 信号数</span><strong id="signals">--</strong><small id="signalsSplit">模拟 -- / 实盘 --</small>
+          </button>
+          <button class="metric-card metric-action" type="button" data-detail="orders" title="查看模拟和实盘订单明细">
+            <span>Orders / 订单数</span><strong id="orders">--</strong><small id="ordersSplit">模拟 -- / 实盘 --</small>
+          </button>
+          <button class="metric-card metric-action" type="button" data-detail="closed_positions" title="查看模拟和实盘平仓明细">
+            <span>Closed / 平仓数</span><strong id="closed">--</strong><small id="closedSplit">模拟 -- / 实盘 --</small>
+          </button>
+          <button class="metric-card metric-action" type="button" data-detail="pnl" title="已实现盈亏（含费率），括号内为收益率">
+            <span>24h PnL / 24h盈亏</span><strong id="pnl">--</strong><small id="pnlSplit">模拟 -- / 实盘 --</small>
+          </button>
+          <div class="metric-card" title="当前模拟持仓，含方向、数量、入场、止损和止盈"><span>Position / 当前持仓</span><strong id="currentPosition">flat</strong><small id="currentPositionMeta">无持仓</small></div>
+          <div class="metric-card" title="最近一次信号触发原因"><span>Signal Reasons / 信号原因</span><strong id="signalReasons">--</strong></div>
+          <div class="metric-card" title="最近一次拒绝信号或拒绝下单原因"><span>Reject Reasons / 拒绝原因</span><strong id="rejectReasons">--</strong></div>
+          <div class="metric-card" title="本地接收时间减交易所事件时间；主要用于判断交易所事件到达本机的延迟"><span>Exchange Lag / 交易所延迟</span><strong id="dataLag">--</strong></div>
+          <div class="metric-card" title="当前时间减最近一次本地收到成交的时间；主要用于判断 WebSocket 是否还在推送"><span>Stream Freshness / 流新鲜度</span><strong id="streamFreshness">--</strong></div>
+          <div class="metric-card" title="最近一笔 Binance aggTrade 事件时间"><span>Last Trade / 最近成交时间</span><strong id="lastTradeTime">--</strong></div>
+          <div class="metric-card" title="行情 WebSocket 或回放数据源状态"><span>Connection / 连接状态</span><strong id="connection">--</strong></div>
+        </section>
 
-      <section class="panel strategy-state" aria-label="Strategy state">
-        <div class="panel-head">
-          <h2>Strategy State / 策略状态</h2>
-          <span>Paper protection / ATR / CVD divergence</span>
-        </div>
-        <div class="state-grid">
-          <div class="state-item">
-            <span>Break-even / 保本移动</span>
-            <strong id="lastBreakEvenShift">--</strong>
-            <small id="lastBreakEvenShiftMeta">--</small>
-          </div>
-          <div class="state-item">
-            <span>Absorption / 吸收减仓</span>
-            <strong id="lastAbsorptionReduce">--</strong>
-            <small id="lastAbsorptionReduceMeta">--</small>
-          </div>
-          <div class="state-item">
-            <span>Big Order / 大单气泡</span>
-            <strong id="lastAggressionBubble">--</strong>
-            <small id="lastAggressionBubbleMeta">--</small>
-          </div>
-          <div class="state-item">
-            <span>ATR / 动态波动</span>
-            <strong id="atrState">--</strong>
-            <small id="atrStateMeta">--</small>
-          </div>
-          <div class="state-item">
-            <span>CVD Divergence / CVD背离</span>
-            <strong id="cvdDivergence">--</strong>
-            <small id="cvdDivergenceMeta">--</small>
-          </div>
-        </div>
-      </section>
-
-      <section class="panel detail-panel is-hidden" id="detailPanel" aria-live="polite">
-        <div class="panel-head detail-head">
-          <div>
-            <h2 id="detailTitle">Details / 明细</h2>
-            <span id="detailSubtitle">Paper / 模拟 · Live / 实盘</span>
-          </div>
-          <button id="detailClose" class="icon-button" type="button" title="Close details" aria-label="Close details">x</button>
-        </div>
-        <div class="range-tabs" aria-label="PnL range">
-          <button type="button" data-range="24h" class="is-active">24h</button>
-          <button type="button" data-range="7d">7d</button>
-          <button type="button" data-range="30d">30d</button>
-          <button type="button" data-range="all">All</button>
-        </div>
-        <div id="detailBody" class="detail-body"></div>
-      </section>
-
-      <section class="workspace">
-        <div class="panel chart-panel">
+        <section class="panel strategy-state" aria-label="Strategy state">
           <div class="panel-head">
-            <h2>Price And Execution / 价格与执行</h2>
-            <span id="tradeCount">0 trades</span>
+            <h2>Strategy State / 策略状态</h2>
+            <span>Paper protection / ATR / CVD divergence</span>
           </div>
-          <canvas id="priceCanvas" width="900" height="360"></canvas>
-        </div>
-      </section>
+          <div class="state-grid">
+            <div class="state-item">
+              <span>Break-even / 保本移动</span>
+              <strong id="lastBreakEvenShift">--</strong>
+              <small id="lastBreakEvenShiftMeta">--</small>
+            </div>
+            <div class="state-item">
+              <span>Absorption / 吸收减仓</span>
+              <strong id="lastAbsorptionReduce">--</strong>
+              <small id="lastAbsorptionReduceMeta">--</small>
+            </div>
+            <div class="state-item">
+              <span>Big Order / 大单气泡</span>
+              <strong id="lastAggressionBubble">--</strong>
+              <small id="lastAggressionBubbleMeta">--</small>
+            </div>
+            <div class="state-item">
+              <span>ATR / 动态波动</span>
+              <strong id="atrState">--</strong>
+              <small id="atrStateMeta">--</small>
+            </div>
+            <div class="state-item">
+              <span>CVD Divergence / CVD背离</span>
+              <strong id="cvdDivergence">--</strong>
+              <small id="cvdDivergenceMeta">--</small>
+            </div>
+          </div>
+        </section>
 
-      <section class="panel tape-panel">
-        <div class="panel-head">
-          <h2>Recent Tape / 成交明细</h2>
-          <span>Binance aggTrade 实时聚合成交</span>
-        </div>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Time / 时间</th>
-                <th>Side / 方向</th>
-                <th>Price / 价格</th>
-                <th>Qty / 数量</th>
-                <th>Delta / 主动差</th>
-              </tr>
-            </thead>
-            <tbody id="tapeBody"></tbody>
-          </table>
+        <section class="panel detail-panel is-hidden" id="detailPanel" aria-live="polite">
+          <div class="panel-head detail-head">
+            <div>
+              <h2 id="detailTitle">Details / 明细</h2>
+              <span id="detailSubtitle">Paper / 模拟 · Live / 实盘</span>
+            </div>
+            <button id="detailClose" class="icon-button" type="button" title="Close details" aria-label="Close details">x</button>
+          </div>
+          <div class="range-tabs" aria-label="PnL range">
+            <button type="button" data-range="24h" class="is-active">24h</button>
+            <button type="button" data-range="7d">7d</button>
+            <button type="button" data-range="30d">30d</button>
+            <button type="button" data-range="all">All</button>
+          </div>
+          <div id="detailBody" class="detail-body"></div>
+        </section>
+
+        <section class="workspace">
+          <div class="panel chart-panel">
+            <div class="panel-head">
+              <h2>Price And Execution / 价格与执行</h2>
+              <span id="tradeCount">0 trades</span>
+            </div>
+            <canvas id="priceCanvas" width="900" height="360"></canvas>
+          </div>
+        </section>
+
+        <section class="panel tape-panel">
+          <div class="panel-head">
+            <h2>Recent Tape / 成交明细</h2>
+            <span>Binance aggTrade 实时聚合成交</span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Time / 时间</th>
+                  <th>Side / 方向</th>
+                  <th>Price / 价格</th>
+                  <th>Qty / 数量</th>
+                  <th>Delta / 主动差</th>
+                </tr>
+              </thead>
+              <tbody id="tapeBody"></tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+
+      <section id="backtestView" class="view-pane backtest-view is-hidden" aria-label="Backtest workspace">
+        <div class="backtest-workspace">
+          <form id="backtestForm" class="panel backtest-form">
+            <div class="panel-head">
+              <h2>Backtest Run / 回测运行</h2>
+              <span>Server CSV path</span>
+            </div>
+            <label>CSV Path
+              <input id="backtestCsvPath" type="text" value="data/btcusdt_recent.csv" autocomplete="off">
+            </label>
+            <label>Symbol
+              <select id="backtestSymbol">
+                <option value="BTCUSDT">BTCUSDT</option>
+                <option value="ETHUSDT">ETHUSDT</option>
+              </select>
+            </label>
+            <label>Equity
+              <input id="backtestEquity" type="number" min="1" step="100" value="10000">
+            </label>
+            <div class="form-grid">
+              <label>Entry Slippage bps
+                <input id="backtestEntrySlippage" type="number" step="0.1" value="2.0">
+              </label>
+              <label>Exit Slippage bps
+                <input id="backtestExitSlippage" type="number" step="0.1" value="3.0">
+              </label>
+            </div>
+            <div class="form-grid">
+              <label>Fee bps
+                <input id="backtestFee" type="number" step="0.1" value="4.0">
+              </label>
+              <label>Split
+                <input id="backtestSplit" type="number" min="0" max="0.95" step="0.05" value="0">
+              </label>
+            </div>
+            <div class="form-grid">
+              <label>Start ms
+                <input id="backtestStart" type="number" placeholder="optional">
+              </label>
+              <label>End ms
+                <input id="backtestEnd" type="number" placeholder="optional">
+              </label>
+            </div>
+            <button id="backtestRunButton" type="submit">Run Backtest</button>
+            <p id="backtestStatus" class="form-status">Ready</p>
+          </form>
+
+          <section id="backtestReport" class="panel backtest-report is-empty">
+            <div class="panel-head">
+              <h2>Backtest Report / 回测报告</h2>
+              <span id="backtestMeta">No run yet</span>
+            </div>
+            <div id="backtestErrors" class="backtest-errors is-hidden"></div>
+            <div id="backtestMetricGrid" class="backtest-metrics"></div>
+            <canvas id="backtestEquityCanvas" width="900" height="220"></canvas>
+            <div class="backtest-tables">
+              <div>
+                <h3>Setup Breakdown</h3>
+                <div class="table-wrap">
+                  <table>
+                    <thead><tr><th>Setup</th><th>Signals</th><th>Trades</th><th>Wins</th><th>Net PnL</th></tr></thead>
+                    <tbody id="backtestSetupBody"></tbody>
+                  </table>
+                </div>
+              </div>
+              <div>
+                <h3>Trades</h3>
+                <div class="table-wrap">
+                  <table>
+                    <thead><tr><th>Exit</th><th>Side</th><th>Entry</th><th>Exit Price</th><th>Net PnL</th><th>R</th></tr></thead>
+                    <tbody id="backtestTradeBody"></tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </section>
         </div>
       </section>
     </main>

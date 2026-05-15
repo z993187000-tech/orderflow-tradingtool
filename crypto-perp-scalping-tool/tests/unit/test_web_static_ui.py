@@ -21,6 +21,41 @@ class WebStaticUiTests(unittest.TestCase):
         self.assertIn("drawYAxis", js)
         self.assertIn("formatAxisValue", js)
 
+    def test_dashboard_contains_backtest_workspace(self):
+        html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+
+        for fragment in [
+            'id="liveView"',
+            'id="backtestView"',
+            'id="backtestForm"',
+            'id="backtestCsvPath"',
+            'id="backtestReport"',
+        ]:
+            self.assertIn(fragment, html)
+
+    def test_javascript_runs_and_renders_backtest_report(self):
+        js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+
+        for fragment in [
+            "/api/backtest/run",
+            "renderBacktestReport",
+            "drawBacktestEquityCurve",
+            "renderBacktestSplitReport",
+            "backtestForm",
+        ]:
+            self.assertIn(fragment, js)
+
+    def test_css_styles_backtest_workspace(self):
+        css = (STATIC_DIR / "app.css").read_text(encoding="utf-8")
+
+        for fragment in [
+            ".view-tabs",
+            ".backtest-workspace",
+            ".backtest-form",
+            ".backtest-report",
+        ]:
+            self.assertIn(fragment, css)
+
     def test_summary_metrics_open_mode_split_details(self):
         html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
         js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
@@ -143,6 +178,26 @@ class WebStaticUiTests(unittest.TestCase):
         self.assertIn("visibleKlinesForTimeRange", js)
         self.assertNotIn("const source = klines && klines.length ? klines : trades;", js)
         self.assertNotIn("if (candleCount < 2) return;", js)
+
+    def test_price_chart_marker_details_toggle_on_left_click(self):
+        js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn("selectedMarkerKey", js)
+        self.assertIn("markerHitboxes", js)
+        self.assertIn("togglePriceMarkerDetail", js)
+        self.assertIn('addEventListener("click"', js)
+        self.assertIn("event.button !== 0", js)
+        self.assertIn("drawMarkerDetail", js)
+        self.assertNotIn("ctx.fillText(marker.label || marker.type", js)
+
+    def test_price_chart_kline_width_scales_with_visible_x_range(self):
+        js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn("klineDurationMs", js)
+        self.assertIn("scale.x(start + duration)", js)
+        self.assertIn("fallbackSlotWidth", js)
+        self.assertIn("drawKlines(ctx, visibleKlines, scale, chartRight, minTs, maxTs)", js)
+        self.assertNotIn("Math.min(slotWidth * 0.7, 12)", js)
 
     def test_price_chart_supports_mouse_zoom_and_drag(self):
         js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")

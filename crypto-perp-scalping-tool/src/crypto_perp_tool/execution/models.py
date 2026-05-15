@@ -17,6 +17,7 @@ class PaperOpenPosition:
     stop_price: float
     initial_stop_price: float
     target_price: float
+    target_r_multiple: float
     opened_at: int
     entry_fee: float = 0.0
     initial_quantity: float = 0.0
@@ -47,8 +48,13 @@ class PaperExecutionConfig:
     pending_entry_timeout_ms: int = 7_000
     limit_entry_pullback_bps: float = 1.0
     post_close_cooldown_ms: int = 30_000
-    first_take_profit_r: float = 1.0
-    first_take_profit_ratio: float = 0.5
-    trail_after_r: float = 1.0
-    trail_atr_multiple: float = 0.35
-    max_holding_ms: int = 180_000
+    reward_risk: float = 5.0
+    dynamic_reward_risk_enabled: bool = True
+    reward_risk_min: float = 3.0
+    reward_risk_max: float = 10.0
+    atr_stop_mult: float = 0.35
+    kline_stop_shift_consecutive_bars: int = 3
+    kline_stop_shift_reference_bars: int = 2
+    min_stop_cost_mult: float = 1.0
+    min_target_cost_mult: float = 2.0
+    max_holding_ms: int = 900_000

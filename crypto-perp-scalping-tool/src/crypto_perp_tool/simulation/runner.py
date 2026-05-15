@@ -6,6 +6,7 @@ from typing import Any
 from crypto_perp_tool.backtest import BacktestReport, BacktestReporter
 from crypto_perp_tool.execution import PaperExecutionConfig, PaperTradingEngine
 from crypto_perp_tool.market_data import TradeEvent
+from crypto_perp_tool.types import SignalSide, TradeSignal
 
 
 @dataclass(frozen=True)
@@ -20,6 +21,7 @@ class SimulationScenario:
     expected_reject_reasons: tuple[str, ...] = ()
     expected_risk_events: tuple[str, ...] = ()
     expected_protective_actions: tuple[str, ...] = ()
+    signal: TradeSignal | None = None
 
 
 @dataclass(frozen=True)
@@ -33,6 +35,19 @@ class SimulationResult:
     protective_actions: tuple[str, ...]
 
 
+class _OneShotSignalEngine:
+    def __init__(self, signal: TradeSignal) -> None:
+        self.signal = signal
+        self.emitted = False
+        self.last_reject_reasons: tuple[str, ...] = ()
+
+    def evaluate(self, snapshot, **kwargs):
+        if not self.emitted and snapshot.event_time >= self.signal.created_at:
+            self.emitted = True
+            return self.signal
+        return None
+
+
 class SimulationRunner:
     def __init__(self, reporter: BacktestReporter | None = None) -> None:
         self.reporter = reporter or BacktestReporter()
@@ -44,6 +59,9 @@ class SimulationRunner:
             signal_cooldown_ms=0,
             execution_config=scenario.execution_config,
         )
+        if scenario.signal is not None:
+            from crypto_perp_tool.execution.paper_engine import PaperTradingEngine as _PTE
+            engine.signals = _OneShotSignalEngine(scenario.signal)
         for trade in scenario.trades:
             engine.process_trade(trade, received_at=trade.timestamp + scenario.received_lag_ms)
 
@@ -78,6 +96,24 @@ class SimulationRunner:
         return tuple(self.run(scenario) for scenario in scenarios)
 
 
+def _sim_signal(side: SignalSide = SignalSide.LONG, entry: float = 126) -> TradeSignal:
+    stop = entry - 20 if side == SignalSide.LONG else entry + 20
+    target = entry + 100 if side == SignalSide.LONG else entry - 100
+    return TradeSignal(
+        id=f"sig-sim-{side.value}",
+        symbol="BTCUSDT",
+        side=side,
+        setup="test_simulation",
+        entry_price=entry,
+        stop_price=stop,
+        target_price=target,
+        confidence=0.8,
+        reasons=("test",),
+        invalidation_rules=("stop",),
+        created_at=8_500,
+    )
+
+
 def default_fault_scenarios() -> tuple[SimulationScenario, ...]:
     setup = _setup_trades()
     entry = (_entry_signal_trade(), _entry_pullback_trade())
@@ -93,15 +129,17 @@ def default_fault_scenarios() -> tuple[SimulationScenario, ...]:
         SimulationScenario(
             name="slippage_expansion",
             description="A filled entry exits under a widened slippage model.",
-            trades=(*setup, *entry, TradeEvent(9_000, "BTCUSDT", 141, 10, False)),
+            trades=(*setup, *entry, TradeEvent(9_000, "BTCUSDT", 230, 10, False)),
             execution_config=PaperExecutionConfig(entry_slippage_bps=20.0, exit_slippage_bps=40.0),
             expected_risk_events=("slippage_expanded",),
+            signal=_sim_signal(),
         ),
         SimulationScenario(
             name="fast_reversal",
             description="A valid entry is followed by an immediate stop-side reversal.",
             trades=(*setup, *entry, TradeEvent(9_000, "BTCUSDT", 100, 10, True)),
             expected_risk_events=("fast_reversal_stop_hit",),
+            signal=_sim_signal(),
         ),
         SimulationScenario(
             name="partial_fill",
@@ -109,12 +147,14 @@ def default_fault_scenarios() -> tuple[SimulationScenario, ...]:
             trades=(*setup, *entry, TradeEvent(9_000, "BTCUSDT", 141, 10, False)),
             execution_config=PaperExecutionConfig(partial_fill_ratio=0.4),
             expected_risk_events=("partial_fill",),
+            signal=_sim_signal(),
         ),
         SimulationScenario(
             name="stop_submission_failure",
             description="Entry fills but protective stop submission fails, so paper engine performs protective close.",
             trades=(*setup, *entry),
             execution_config=PaperExecutionConfig(stop_submission_success=False, exit_slippage_bps=5.0),
+            signal=_sim_signal(),
         ),
     )
 

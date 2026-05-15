@@ -7,7 +7,7 @@ from pathlib import Path
 from crypto_perp_tool.config import default_settings
 from crypto_perp_tool.journal import JsonlJournal, TradeLogger
 from crypto_perp_tool.market_data import TradeEvent
-from crypto_perp_tool.profile import VolumeProfileEngine
+from crypto_perp_tool.profile import build_profile_levels
 from crypto_perp_tool.risk import AccountState, RiskEngine
 from crypto_perp_tool.signals import SignalEngine
 from crypto_perp_tool.types import MarketSnapshot, ProfileLevelType, make_trade_record
@@ -34,6 +34,7 @@ class PaperPosition:
     entry_price: float
     stop_price: float
     target_price: float
+    target_r_multiple: float = 5.0
     setup: str = "unknown"
     opened_at: int = 0
     initial_stop_price: float = 0.0
@@ -49,7 +50,22 @@ class PaperRunner:
         self.trade_log = TradeLogger(trade_log_path) if trade_log_path is not None else None
         self.taker_fee_rate = taker_fee_rate
         self.risk = RiskEngine(self.settings.risk)
-        self.signals = SignalEngine(self.settings.signals.min_reward_risk, self.settings.execution.max_data_lag_ms)
+        self.signals = SignalEngine(
+            self.settings.signals.min_reward_risk,
+            self.settings.execution.max_data_lag_ms,
+            session_gating_enabled=self.settings.signals.session_gating_enabled,
+            reward_risk=self.settings.execution.reward_risk,
+            dynamic_reward_risk_enabled=self.settings.execution.dynamic_reward_risk_enabled,
+            reward_risk_min=self.settings.execution.reward_risk_min,
+            reward_risk_max=self.settings.execution.reward_risk_max,
+            atr_stop_mult=self.settings.execution.atr_stop_mult,
+            min_stop_cost_mult=self.settings.execution.min_stop_cost_mult,
+            min_target_cost_mult=self.settings.execution.min_target_cost_mult,
+            taker_fee_rate=self.taker_fee_rate,
+            execution_window=f"execution_{self.settings.profile.execution_window_minutes}m",
+            micro_window=f"micro_{self.settings.profile.micro_window_minutes}m",
+            context_window=f"context_{self.settings.profile.context_window_minutes}m",
+        )
 
     def run_csv(self, path: Path | str, symbol: str = "BTCUSDT") -> PaperRunResult:
         events = list(self._load_csv(Path(path), symbol))
@@ -57,7 +73,6 @@ class PaperRunner:
             return PaperRunResult(0, 0, 0, 0, 0, 0.0, str(self.journal.path))
 
         bin_size = self.settings.profile.btc_bin_size if symbol == "BTCUSDT" else self.settings.profile.eth_bin_size
-        profile = VolumeProfileEngine(bin_size=bin_size, value_area_ratio=self.settings.profile.value_area_ratio)
         rolling_delta: list[float] = []
         signal_count = 0
         order_count = 0
@@ -73,34 +88,16 @@ class PaperRunner:
                 self._update_max_moves(position, event.price)
                 exit_reason, close_price = self._close_trigger(position, event.price)
                 if close_price is not None:
-                    gross_pnl = self._position_pnl(position, close_price)
-                    entry_fee = abs(position.entry_price * position.quantity) * self.taker_fee_rate
-                    exit_fee = abs(close_price * position.quantity) * self.taker_fee_rate
-                    net_pnl = gross_pnl - entry_fee - exit_fee
+                    net_pnl = self._close_position(position, event.timestamp, close_price, exit_reason)
                     realized_pnl += net_pnl
                     closed_positions += 1
-                    self.journal.write(
-                        "position_closed",
-                        {
-                            "signal_id": position.signal_id,
-                            "symbol": position.symbol,
-                            "side": position.side.value,
-                            "quantity": position.quantity,
-                            "entry_price": position.entry_price,
-                            "close_price": close_price,
-                            "entry_fee": entry_fee,
-                            "exit_fee": exit_fee,
-                            "gross_pnl": gross_pnl,
-                            "net_pnl": net_pnl,
-                            "realized_pnl": net_pnl,
-                        },
-                    )
-                    self._write_trade_record(position, event.timestamp, close_price, gross_pnl, net_pnl, exit_reason)
                     position = None
 
-            profile.add_trade(event.price, event.quantity)
             rolling_delta.append(event.delta)
-            levels = profile.levels("rolling_4h")
+            if position is not None:
+                continue
+
+            levels = self._profile_levels(seen_events, event.timestamp, bin_size)
             if not any(level.type == ProfileLevelType.LVN for level in levels):
                 continue
 
@@ -143,6 +140,7 @@ class PaperRunner:
                     entry_price=signal.entry_price,
                     stop_price=signal.stop_price,
                     target_price=signal.target_price,
+                    target_r_multiple=signal.target_r_multiple,
                     setup=signal.setup,
                     opened_at=signal.created_at,
                     initial_stop_price=signal.stop_price,
@@ -167,10 +165,18 @@ class PaperRunner:
                         "entry_price": signal.entry_price,
                         "stop_price": signal.stop_price,
                         "target_price": signal.target_price,
+                        "target_r_multiple": signal.target_r_multiple,
                     },
                 )
             else:
                 rejected_count += 1
+
+        if position is not None:
+            final_event = events[-1]
+            self._update_max_moves(position, final_event.price)
+            net_pnl = self._close_position(position, final_event.timestamp, final_event.price, "end_of_replay")
+            realized_pnl += net_pnl
+            closed_positions += 1
 
         return PaperRunResult(
             len(events),
@@ -207,6 +213,40 @@ class PaperRunner:
             return 0
         return sum(event.price * event.quantity for event in events) / total_quantity
 
+    def _profile_levels(self, events: list[TradeEvent], timestamp: int, bin_size: float):
+        settings = self.settings.profile
+        trades = [(event.price, event.quantity, event.timestamp) for event in events]
+        return (
+            *build_profile_levels(
+                trades,
+                timestamp=timestamp,
+                window_ms=settings.execution_window_minutes * 60 * 1000,
+                label=f"execution_{settings.execution_window_minutes}m",
+                bin_size=bin_size,
+                value_area_ratio=settings.value_area_ratio,
+                min_trades=settings.min_execution_profile_trades,
+                min_bins=settings.min_profile_bins,
+            ),
+            *build_profile_levels(
+                trades,
+                timestamp=timestamp,
+                window_ms=settings.micro_window_minutes * 60 * 1000,
+                label=f"micro_{settings.micro_window_minutes}m",
+                bin_size=bin_size,
+                value_area_ratio=settings.value_area_ratio,
+                min_trades=settings.min_micro_profile_trades,
+                min_bins=settings.min_profile_bins,
+            ),
+            *build_profile_levels(
+                trades,
+                timestamp=timestamp,
+                window_ms=settings.context_window_minutes * 60 * 1000,
+                label=f"context_{settings.context_window_minutes}m",
+                bin_size=bin_size,
+                value_area_ratio=settings.value_area_ratio,
+            ),
+        )
+
     def _close_trigger(self, position: PaperPosition, price: float) -> tuple[str | None, float | None]:
         if position.side == SignalSide.LONG:
             if price <= position.stop_price:
@@ -224,6 +264,34 @@ class PaperRunner:
         if position.side == SignalSide.LONG:
             return (close_price - position.entry_price) * position.quantity
         return (position.entry_price - close_price) * position.quantity
+
+    def _close_position(self, position: PaperPosition, timestamp: int, close_price: float, exit_reason: str) -> float:
+        gross_pnl = self._position_pnl(position, close_price)
+        entry_fee = abs(position.entry_price * position.quantity) * self.taker_fee_rate
+        exit_fee = abs(close_price * position.quantity) * self.taker_fee_rate
+        net_pnl = gross_pnl - entry_fee - exit_fee
+        self.journal.write(
+            "position_closed",
+            {
+                "signal_id": position.signal_id,
+                "symbol": position.symbol,
+                "side": position.side.value,
+                "quantity": position.quantity,
+                "entry_price": position.entry_price,
+                "close_price": close_price,
+                "stop_price": position.stop_price,
+                "target_price": position.target_price,
+                "target_r_multiple": position.target_r_multiple,
+                "entry_fee": entry_fee,
+                "exit_fee": exit_fee,
+                "gross_pnl": gross_pnl,
+                "net_pnl": net_pnl,
+                "realized_pnl": net_pnl,
+                "exit_reason": exit_reason,
+            },
+        )
+        self._write_trade_record(position, timestamp, close_price, gross_pnl, net_pnl, exit_reason)
+        return net_pnl
 
     def _update_max_moves(self, position: PaperPosition, price: float) -> None:
         if position.side == SignalSide.LONG:

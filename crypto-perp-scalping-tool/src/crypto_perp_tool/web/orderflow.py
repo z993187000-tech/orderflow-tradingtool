@@ -8,7 +8,7 @@ from typing import Any
 from crypto_perp_tool.config import default_settings
 from crypto_perp_tool.market_data import AggressionBubbleDetector, AtrTracker, TradeEvent
 from crypto_perp_tool.paper import PaperRunner
-from crypto_perp_tool.profile import VolumeProfileEngine
+from crypto_perp_tool.profile import build_profile_levels
 from crypto_perp_tool.serialization import to_jsonable
 from crypto_perp_tool.web.details import build_paper_details_from_journal, mode_breakdown, total_pnl_for_range
 from crypto_perp_tool.web.strategy_state import cvd_divergence_state, last_action
@@ -19,7 +19,6 @@ def build_orderflow_view(data_path: Path | str, symbol: str = "BTCUSDT") -> dict
     events = _load_trade_events(path, symbol)
     settings = default_settings()
     bin_size = settings.profile.btc_bin_size if symbol == "BTCUSDT" else settings.profile.eth_bin_size
-    profile = VolumeProfileEngine(bin_size=bin_size, value_area_ratio=settings.profile.value_area_ratio)
     bubble_detector = AggressionBubbleDetector(
         large_threshold=settings.signals.aggression_large_threshold,
         block_threshold=settings.signals.aggression_block_threshold,
@@ -34,7 +33,6 @@ def build_orderflow_view(data_path: Path | str, symbol: str = "BTCUSDT") -> dict
     last_bubble = None
 
     for index, event in enumerate(events):
-        profile.add_trade(event.price, event.quantity)
         cumulative_delta += event.delta
         atr_1m.update(event)
         atr_3m.update(event)
@@ -78,7 +76,7 @@ def build_orderflow_view(data_path: Path | str, symbol: str = "BTCUSDT") -> dict
         markers = _attach_marker_indexes(bubble_markers, trades) + _markers_from_journal(journal_path, trades)
         details = build_paper_details_from_journal(journal_path)
 
-    levels = profile.levels("rolling_4h")
+    levels = _profile_levels(events, bin_size, settings.profile)
     profile_levels = [
         {
             "type": level.type.value,
@@ -134,6 +132,43 @@ def _current_atr(latest_atr: float, fallback_price: float, bin_size: float) -> f
     if latest_atr > 0:
         return latest_atr
     return max(fallback_price * 0.002, bin_size / 2)
+
+
+def _profile_levels(events: list[TradeEvent], bin_size: float, settings):
+    if not events:
+        return ()
+    timestamp = events[-1].timestamp
+    trades = [(event.price, event.quantity, event.timestamp) for event in events]
+    return (
+        *build_profile_levels(
+            trades,
+            timestamp=timestamp,
+            window_ms=settings.execution_window_minutes * 60 * 1000,
+            label=f"execution_{settings.execution_window_minutes}m",
+            bin_size=bin_size,
+            value_area_ratio=settings.value_area_ratio,
+            min_trades=settings.min_execution_profile_trades,
+            min_bins=settings.min_profile_bins,
+        ),
+        *build_profile_levels(
+            trades,
+            timestamp=timestamp,
+            window_ms=settings.micro_window_minutes * 60 * 1000,
+            label=f"micro_{settings.micro_window_minutes}m",
+            bin_size=bin_size,
+            value_area_ratio=settings.value_area_ratio,
+            min_trades=settings.min_micro_profile_trades,
+            min_bins=settings.min_profile_bins,
+        ),
+        *build_profile_levels(
+            trades,
+            timestamp=timestamp,
+            window_ms=settings.context_window_minutes * 60 * 1000,
+            label=f"context_{settings.context_window_minutes}m",
+            bin_size=bin_size,
+            value_area_ratio=settings.value_area_ratio,
+        ),
+    )
 
 
 def _load_trade_events(path: Path, symbol: str) -> list[TradeEvent]:

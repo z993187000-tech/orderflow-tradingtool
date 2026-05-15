@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from crypto_perp_tool.backtest import BacktestConfig, BacktestEngine, BacktestResult
 from crypto_perp_tool.journal import JsonlJournal
 from crypto_perp_tool.market_data.binance import BinanceAggTradeClient, BinanceHistoricalKlineClient, fetch_instrument_spec
+from crypto_perp_tool.serialization import to_jsonable
 from crypto_perp_tool.service import TradingService
 from crypto_perp_tool.telegram_bot import TelegramCommandHandler, TelegramPoller, parse_allowed_chat_ids
 from crypto_perp_tool.web.auth import is_authorized, required_auth_header
@@ -85,6 +88,32 @@ def create_app_handler(
                 result = store.resume_circuit(actor="web")
                 self._send_json(result)
                 return
+            if parsed.path == "/api/backtest/run":
+                try:
+                    payload = self._read_json_body()
+                    csv_path = _safe_project_path(str(payload.get("csv_path", "")), Path.cwd())
+                    events = BacktestEngine.load_csv(csv_path, symbol=str(payload.get("symbol", symbol)).upper())
+                    split = float(payload.get("split") or 0.0)
+                    config = BacktestConfig(
+                        symbol=str(payload.get("symbol", symbol)).upper(),
+                        equity=float(payload.get("equity") or 10_000),
+                        start_ms=_optional_int(payload.get("start_ms")),
+                        end_ms=_optional_int(payload.get("end_ms")),
+                        entry_slippage_bps=float(payload.get("entry_slippage_bps") or 2.0),
+                        exit_slippage_bps=float(payload.get("exit_slippage_bps") or 3.0),
+                        fee_bps=float(payload.get("fee_bps") or 4.0),
+                        is_fraction=split if split > 0 else 0.0,
+                        oos_fraction=(1.0 - split) if split > 0 else 0.0,
+                    )
+                    engine = BacktestEngine(config=config)
+                    if config.is_fraction > 0:
+                        is_result, oos_result = engine.run_split(events)
+                        self._send_json(_format_split_backtest_api_result(is_result, oos_result))
+                    else:
+                        self._send_json(_format_backtest_api_result(engine.run(events)))
+                except (ValueError, OSError, json.JSONDecodeError) as exc:
+                    self._send_json({"error": str(exc)}, status=400)
+                return
             if parsed.path == "/api/trade-log":
                 query = parse_qs(parsed.query)
                 requested_symbol = query.get("symbol", [symbol])[0].upper()
@@ -107,9 +136,19 @@ def create_app_handler(
         def log_message(self, format: str, *args) -> None:
             return
 
-        def _send_json(self, payload: dict) -> None:
-            body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-            self.send_response(200)
+        def _read_json_body(self) -> dict:
+            length = int(self.headers.get("Content-Length", "0") or "0")
+            if length <= 0:
+                raise ValueError("empty JSON body")
+            body = self.rfile.read(length).decode("utf-8")
+            payload = json.loads(body)
+            if not isinstance(payload, dict):
+                raise ValueError("JSON body must be an object")
+            return payload
+
+        def _send_json(self, payload: dict | list, status: int = 200) -> None:
+            body = json.dumps(_json_safe(to_jsonable(payload)), ensure_ascii=False).encode("utf-8")
+            self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
@@ -162,15 +201,22 @@ def seed_historical_klines(
     client = client or BinanceHistoricalKlineClient()
     now_ms = int(time.time() * 1000) if now_ms is None else int(now_ms)
     start_ms = now_ms - KLINE_LOOKBACK_MS
-    klines = client.download(
-        store.symbol,
-        interval=KLINE_INTERVAL,
-        limit=KLINE_HISTORY_LIMIT,
-        start_time=start_ms,
-        end_time=now_ms,
-    )
-    store.seed_klines(klines)
-    return len(klines)
+    total = 0
+    interval_limits = {"1m": 20, "3m": 20, KLINE_INTERVAL: KLINE_HISTORY_LIMIT}
+    for interval in ("1m", "3m", KLINE_INTERVAL):
+        try:
+            klines = client.download(
+                store.symbol,
+                interval=interval,
+                limit=interval_limits[interval],
+                start_time=start_ms,
+                end_time=now_ms,
+            )
+            store.seed_klines(klines)
+            total += len(klines)
+        except Exception:
+            pass
+    return total
 
 
 def active_live_symbols(primary_symbol: str, symbols: str | tuple[str, ...] | list[str] | None = None) -> tuple[str, ...]:
@@ -298,6 +344,71 @@ def paper_journal_path_for_symbol(base_path: Path | str, symbol: str) -> Path:
     suffix = base_path.suffix or ".jsonl"
     stem = base_path.stem if base_path.suffix else base_path.name
     return base_path.with_name(f"{stem}-{symbol.lower()}{suffix}")
+
+
+def _optional_int(value) -> int | None:
+    if value in (None, ""):
+        return None
+    return int(value)
+
+
+def _safe_project_path(raw_path: str, project_root: Path) -> Path:
+    if not raw_path or not raw_path.strip():
+        raise ValueError("csv_path is required")
+    candidate = Path(raw_path)
+    if candidate.is_absolute() or ".." in candidate.parts:
+        raise ValueError("csv_path must be a project-relative path")
+    root = project_root.resolve()
+    resolved = (root / candidate).resolve()
+    if resolved != root and root not in resolved.parents:
+        raise ValueError("csv_path must stay inside the project")
+    if not resolved.exists() or not resolved.is_file():
+        raise ValueError(f"CSV file not found: {raw_path}")
+    return resolved
+
+
+def _format_backtest_api_result(result: BacktestResult) -> dict:
+    return {
+        "mode": "single",
+        "symbol": result.symbol,
+        "total_events": result.total_events,
+        "equity_start": result.equity_start,
+        "equity_end": result.equity_end,
+        "total_return_pct": result.total_return_pct,
+        "report": result.report,
+        "equity_curve": result.equity_curve,
+        "trade_records": result.trade_records,
+        "data_quality": result.data_quality,
+        "config_version": result.config_version,
+        "errors": result.errors,
+    }
+
+
+def _format_split_backtest_api_result(is_result: BacktestResult, oos_result: BacktestResult) -> dict:
+    is_payload = _format_backtest_api_result(is_result)
+    oos_payload = _format_backtest_api_result(oos_result)
+    is_payload["mode"] = "in_sample"
+    oos_payload["mode"] = "out_of_sample"
+    is_pf = is_result.report.profit_factor if is_result.report else 0.0
+    oos_pf = oos_result.report.profit_factor if oos_result.report else 0.0
+    return {
+        "mode": "split",
+        "symbol": is_result.symbol,
+        "total_events": is_result.total_events + oos_result.total_events,
+        "in_sample": is_payload,
+        "out_of_sample": oos_payload,
+        "walk_forward_efficiency": round(oos_pf / is_pf, 4) if is_pf > 0 and math.isfinite(is_pf) else 0.0,
+    }
+
+
+def _json_safe(value):
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    return value
 
 
 def _content_type(path: Path) -> str:

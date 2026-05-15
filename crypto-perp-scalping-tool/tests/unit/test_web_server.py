@@ -1,6 +1,9 @@
 import json
+import threading
 import tempfile
 import unittest
+from http.client import HTTPConnection
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 from crypto_perp_tool.market_data import KlineEvent
@@ -12,6 +15,40 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 class WebServerTests(unittest.TestCase):
+    def post_backtest(self, payload: dict) -> tuple[int, dict]:
+        handler = create_app_handler(
+            data_path=PROJECT_ROOT / "data" / "sample_trades.csv",
+            source="csv",
+            symbol="BTCUSDT",
+            password="",
+        )
+        server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        connection = None
+        try:
+            connection = HTTPConnection("127.0.0.1", server.server_port, timeout=10)
+            body = json.dumps(payload).encode("utf-8")
+            connection.request(
+                "POST",
+                "/api/backtest/run",
+                body=body,
+                headers={"Content-Type": "application/json", "Content-Length": str(len(body))},
+            )
+            response = connection.getresponse()
+            response_body = response.read().decode("utf-8")
+            try:
+                payload = json.loads(response_body)
+            except json.JSONDecodeError:
+                payload = {"raw": response_body}
+            return response.status, payload
+        finally:
+            if connection is not None:
+                connection.close()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
     def test_static_assets_exist(self):
         static_dir = PROJECT_ROOT / "src" / "crypto_perp_tool" / "web" / "static"
 
@@ -51,6 +88,30 @@ class WebServerTests(unittest.TestCase):
         )
 
         self.assertTrue(callable(handler))
+
+    def test_backtest_run_endpoint_returns_report(self):
+        status, payload = self.post_backtest({
+            "csv_path": "data/btcusdt_recent.csv",
+            "symbol": "BTCUSDT",
+            "equity": 10_000,
+        })
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["mode"], "single")
+        self.assertEqual(payload["symbol"], "BTCUSDT")
+        self.assertGreater(payload["total_events"], 0)
+        self.assertIn("report", payload)
+        self.assertIn("equity_curve", payload)
+
+    def test_backtest_run_endpoint_rejects_unsafe_paths(self):
+        status, payload = self.post_backtest({
+            "csv_path": "../CLAUDE.md",
+            "symbol": "BTCUSDT",
+            "equity": 10_000,
+        })
+
+        self.assertEqual(status, 400)
+        self.assertIn("error", payload)
 
     def test_symbol_specific_paper_journal_paths_do_not_collide(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -93,15 +154,13 @@ class WebServerTests(unittest.TestCase):
 
         count = seed_historical_klines(store, client, now_ms=29_000_000)
 
-        self.assertEqual(count, 2)
-        self.assertEqual(client.calls, [{
-            "symbol": "BTCUSDT",
-            "interval": "5m",
-            "limit": 96,
-            "start_time": 200_000,
-            "end_time": 29_000_000,
-        }])
-        self.assertEqual(len(store.view()["klines"]), 2)
+        self.assertEqual(count, 6)
+        self.assertEqual(client.calls, [
+            {"symbol": "BTCUSDT", "interval": "1m", "limit": 20, "start_time": 200_000, "end_time": 29_000_000},
+            {"symbol": "BTCUSDT", "interval": "3m", "limit": 20, "start_time": 200_000, "end_time": 29_000_000},
+            {"symbol": "BTCUSDT", "interval": "5m", "limit": 96, "start_time": 200_000, "end_time": 29_000_000},
+        ])
+        self.assertEqual(len(store.view()["klines"]), 6)
 
 
 if __name__ == "__main__":

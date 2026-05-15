@@ -27,6 +27,8 @@ class QuoteEvent:
     symbol: str
     bid_price: float
     ask_price: float
+    bid_qty: float = 0.0
+    ask_qty: float = 0.0
 
     @property
     def mid_price(self) -> float:

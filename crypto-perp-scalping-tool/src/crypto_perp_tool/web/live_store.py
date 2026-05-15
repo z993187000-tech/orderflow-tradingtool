@@ -21,17 +21,16 @@ from crypto_perp_tool.execution.fills import (
 from crypto_perp_tool.execution.position_rules import (
     absorption_should_reduce,
     break_even_stop_price,
-    partial_take_profit_price,
+    estimated_round_trip_cost,
+    kline_momentum_stop_price,
     price_moves,
     should_close_for_orderflow_invalidation,
-    trailing_stop_price,
     triggered_close,
 )
 from crypto_perp_tool.journal import JsonlJournal, TradeLogger
 from crypto_perp_tool.market_data import (
     AggressionBubble,
     AggressionBubbleDetector,
-    AtrTracker,
     FlashCrashDetector,
     ForceOrderEvent,
     KlineEvent,
@@ -44,7 +43,7 @@ from crypto_perp_tool.market_data import (
 from crypto_perp_tool.market_data.binance import BinanceInstrumentSpec, default_instrument_spec
 from crypto_perp_tool.market_data.health import compute_health
 from crypto_perp_tool.market_data.latency import compute_exchange_lag_ms
-from crypto_perp_tool.profile import VolumeProfileEngine
+from crypto_perp_tool.profile import build_profile_levels
 from crypto_perp_tool.risk import AccountState, RiskEngine
 from crypto_perp_tool.risk.circuit import CircuitBreaker
 from crypto_perp_tool.serialization import to_jsonable
@@ -73,6 +72,13 @@ KLINE_HISTORY_MS = 8 * 60 * 60 * 1000
 KLINE_INTERVAL_MS = 5 * 60 * 1000
 
 
+def _true_range(kline: KlineEvent, prev_close: float | None) -> float:
+    hl = kline.high - kline.low
+    if prev_close is None:
+        return hl
+    return max(hl, abs(kline.high - prev_close), abs(kline.low - prev_close))
+
+
 def _level_price(levels: tuple[ProfileLevel, ...], level_type: str) -> float:
     for level in levels:
         if level.type.value == level_type:
@@ -99,9 +105,12 @@ class LiveOrderflowStore:
         self.display_events = display_events
         self.equity = equity
         self.settings = default_settings()
-        self._profile_window_ms = self.settings.profile.rolling_window_minutes * 60 * 1000
+        self._execution_profile_window_ms = self.settings.profile.execution_window_minutes * 60 * 1000
+        self._micro_profile_window_ms = self.settings.profile.micro_window_minutes * 60 * 1000
+        self._context_profile_window_ms = self.settings.profile.context_window_minutes * 60 * 1000
+        self._profile_window_ms = self._execution_profile_window_ms
         self._events: deque[TradeEvent] = deque(maxlen=max_events)
-        self._trade_window = TimeWindowBuffer[TradeEvent](max_window_ms=self._profile_window_ms)
+        self._trade_window = TimeWindowBuffer[TradeEvent](max_window_ms=self._context_profile_window_ms)
         self._profile_quantity = 0.0
         self._profile_notional = 0.0
         self._indicator_windows: dict[int, deque[TradeEvent]] = {
@@ -134,6 +143,17 @@ class LiveOrderflowStore:
             min_reward_risk=self.settings.signals.min_reward_risk,
             max_data_lag_ms=self.settings.execution.max_data_lag_ms,
             session_gating_enabled=self.settings.signals.session_gating_enabled,
+            reward_risk=self.settings.execution.reward_risk,
+            dynamic_reward_risk_enabled=self.settings.execution.dynamic_reward_risk_enabled,
+            reward_risk_min=self.settings.execution.reward_risk_min,
+            reward_risk_max=self.settings.execution.reward_risk_max,
+            atr_stop_mult=self.settings.execution.atr_stop_mult,
+            min_stop_cost_mult=self.settings.execution.min_stop_cost_mult,
+            min_target_cost_mult=self.settings.execution.min_target_cost_mult,
+            taker_fee_rate=self._instrument.taker_fee_rate,
+            execution_window=f"execution_{self.settings.profile.execution_window_minutes}m",
+            micro_window=f"micro_{self.settings.profile.micro_window_minutes}m",
+            context_window=f"context_{self.settings.profile.context_window_minutes}m",
         ) if enable_signals else None
         self.testing_mode = testing_mode
         self._risk = RiskEngine(self.settings.risk, testing_mode=testing_mode)
@@ -172,8 +192,13 @@ class LiveOrderflowStore:
             half_life_ms=self.settings.signals.aggression_half_life_minutes * 60 * 1000,
         )
         self._last_bubble: AggressionBubble | None = None
-        self._atr_1m = AtrTracker(bar_ms=60_000, period=self.settings.signals.atr_period)
-        self._atr_3m = AtrTracker(bar_ms=3 * 60_000, period=self.settings.signals.atr_period)
+        _atr_period = self.settings.signals.atr_period
+        self._tr_1m: deque[float] = deque(maxlen=_atr_period)
+        self._tr_3m: deque[float] = deque(maxlen=_atr_period)
+        self._prev_close_1m: float | None = None
+        self._prev_close_3m: float | None = None
+        self._atr_1m_value: float = 0.0
+        self._atr_3m_value: float = 0.0
         self._session_detector = SessionDetector(
             asia_start_hour=self.settings.profile.asia_start_hour,
             asia_end_hour=self.settings.profile.asia_end_hour,
@@ -227,8 +252,6 @@ class LiveOrderflowStore:
             )
             self._update_trade_kline(event)
             self._cumulative_delta += event.delta
-            self._atr_1m.update(event)
-            self._atr_3m.update(event)
             self._record_aggression_bubble(event)
             self._refresh_indicators(event)
             filled_pending_entry = self._try_fill_pending_entry(event)
@@ -291,6 +314,7 @@ class LiveOrderflowStore:
         with self._lock:
             self._invalidate_view_cache()
             self._upsert_kline(event, synthetic=False)
+            self._update_atr_from_kline(event)
 
     def seed_klines(self, events: list[KlineEvent] | tuple[KlineEvent, ...]) -> None:
         with self._lock:
@@ -298,6 +322,7 @@ class LiveOrderflowStore:
             for event in events:
                 if event.symbol.upper() == self.symbol:
                     self._upsert_kline(event, synthetic=False)
+            self._init_atr_from_klines()
 
     def _update_trade_kline(self, event: TradeEvent) -> None:
         bucket_start = (event.timestamp // KLINE_INTERVAL_MS) * KLINE_INTERVAL_MS
@@ -377,6 +402,44 @@ class LiveOrderflowStore:
         active_keys = {(kline.interval, kline.timestamp) for kline in self._klines}
         self._synthetic_kline_keys.intersection_update(active_keys)
 
+    def _update_atr_from_kline(self, event: KlineEvent) -> None:
+        if not event.is_closed:
+            return
+        if event.interval == "1m":
+            tr = _true_range(event, self._prev_close_1m)
+            self._tr_1m.append(tr)
+            self._prev_close_1m = event.close
+            self._atr_1m_value = sum(self._tr_1m) / len(self._tr_1m)
+        elif event.interval == "3m":
+            tr = _true_range(event, self._prev_close_3m)
+            self._tr_3m.append(tr)
+            self._prev_close_3m = event.close
+            self._atr_3m_value = sum(self._tr_3m) / len(self._tr_3m)
+
+    def _init_atr_from_klines(self) -> None:
+        """Recompute 1m and 3m ATR from all completed klines in storage."""
+        for interval, tr_deque_ref, prev_close_ref in (
+            ("1m", self._tr_1m, "_prev_close_1m"),
+            ("3m", self._tr_3m, "_prev_close_3m"),
+        ):
+            completed = sorted(
+                [k for k in self._klines if k.interval == interval and k.is_closed],
+                key=lambda k: k.timestamp,
+            )
+            tr_deque_ref.clear()
+            prev_close: float | None = None
+            atr_value = 0.0
+            for bar in completed:
+                tr = _true_range(bar, prev_close)
+                tr_deque_ref.append(tr)
+                prev_close = bar.close
+                atr_value = sum(tr_deque_ref) / len(tr_deque_ref)
+            setattr(self, prev_close_ref, prev_close)
+            if interval == "1m":
+                self._atr_1m_value = atr_value
+            else:
+                self._atr_3m_value = atr_value
+
     def set_connection_status(self, status: str, message: str) -> None:
         with self._lock:
             self._invalidate_view_cache()
@@ -425,6 +488,56 @@ class LiveOrderflowStore:
             if pct_threshold is not None:
                 self._flash_crash_detector.pct_threshold = pct_threshold
 
+    def update_strategy_params(self, reward_risk: float | None = None, atr_stop_mult: float | None = None,
+                               dynamic_reward_risk_enabled: bool | None = None,
+                               reward_risk_min: float | None = None,
+                               reward_risk_max: float | None = None,
+                               min_stop_cost_mult: float | None = None,
+                               min_target_cost_mult: float | None = None, max_holding_ms: int | None = None,
+                               kline_stop_shift_consecutive_bars: int | None = None,
+                               kline_stop_shift_reference_bars: int | None = None) -> None:
+        with self._lock:
+            exec_settings = self.settings.execution
+            kwargs: dict[str, Any] = {}
+            if reward_risk is not None:
+                kwargs["reward_risk"] = float(reward_risk)
+            if dynamic_reward_risk_enabled is not None:
+                kwargs["dynamic_reward_risk_enabled"] = bool(dynamic_reward_risk_enabled)
+            if reward_risk_min is not None:
+                kwargs["reward_risk_min"] = float(reward_risk_min)
+            if reward_risk_max is not None:
+                kwargs["reward_risk_max"] = float(reward_risk_max)
+            if atr_stop_mult is not None:
+                kwargs["atr_stop_mult"] = float(atr_stop_mult)
+            if kline_stop_shift_consecutive_bars is not None:
+                kwargs["kline_stop_shift_consecutive_bars"] = int(kline_stop_shift_consecutive_bars)
+            if kline_stop_shift_reference_bars is not None:
+                kwargs["kline_stop_shift_reference_bars"] = int(kline_stop_shift_reference_bars)
+            if min_stop_cost_mult is not None:
+                kwargs["min_stop_cost_mult"] = float(min_stop_cost_mult)
+            if min_target_cost_mult is not None:
+                kwargs["min_target_cost_mult"] = float(min_target_cost_mult)
+            if max_holding_ms is not None:
+                kwargs["max_holding_ms"] = int(max_holding_ms)
+            if kwargs:
+                new_exec = replace(exec_settings, **kwargs)
+                self.settings = replace(self.settings, execution=new_exec)
+                if self._signal_engine is not None:
+                    if reward_risk is not None:
+                        self._signal_engine.reward_risk = float(reward_risk)
+                    if dynamic_reward_risk_enabled is not None:
+                        self._signal_engine.dynamic_reward_risk_enabled = bool(dynamic_reward_risk_enabled)
+                    if reward_risk_min is not None:
+                        self._signal_engine.reward_risk_min = float(reward_risk_min)
+                    if reward_risk_max is not None:
+                        self._signal_engine.reward_risk_max = float(reward_risk_max)
+                    if atr_stop_mult is not None:
+                        self._signal_engine.atr_stop_mult = float(atr_stop_mult)
+                    if min_stop_cost_mult is not None:
+                        self._signal_engine.min_stop_cost_mult = float(min_stop_cost_mult)
+                    if min_target_cost_mult is not None:
+                        self._signal_engine.min_target_cost_mult = float(min_target_cost_mult)
+
     def _refresh_indicators(self, event: TradeEvent) -> None:
         for window_ms in self._indicator_windows:
             self._update_indicator_window(window_ms, event)
@@ -472,10 +585,39 @@ class LiveOrderflowStore:
         )
 
     def _profile_levels(self, timestamp: int):
-        profile = VolumeProfileEngine(bin_size=self._bin_size, value_area_ratio=self.settings.profile.value_area_ratio)
-        for event in self._trade_window.items_since(timestamp, self._profile_window_ms):
-            profile.add_trade(event.price, event.quantity, timestamp=event.timestamp)
-        return tuple(replace(level, window="rolling_4h") for level in profile.levels(window="all"))
+        settings = self.settings.profile
+        events = self._trade_window.items_since(timestamp, self._context_profile_window_ms)
+        trades = [(event.price, event.quantity, event.timestamp) for event in events]
+        return (
+            *build_profile_levels(
+                trades,
+                timestamp=timestamp,
+                window_ms=self._execution_profile_window_ms,
+                label=f"execution_{settings.execution_window_minutes}m",
+                bin_size=self._bin_size,
+                value_area_ratio=settings.value_area_ratio,
+                min_trades=settings.min_execution_profile_trades,
+                min_bins=settings.min_profile_bins,
+            ),
+            *build_profile_levels(
+                trades,
+                timestamp=timestamp,
+                window_ms=self._micro_profile_window_ms,
+                label=f"micro_{settings.micro_window_minutes}m",
+                bin_size=self._bin_size,
+                value_area_ratio=settings.value_area_ratio,
+                min_trades=settings.min_micro_profile_trades,
+                min_bins=settings.min_profile_bins,
+            ),
+            *build_profile_levels(
+                trades,
+                timestamp=timestamp,
+                window_ms=self._context_profile_window_ms,
+                label=f"context_{settings.context_window_minutes}m",
+                bin_size=self._bin_size,
+                value_area_ratio=settings.value_area_ratio,
+            ),
+        )
 
     def _update_historical(self, event: TradeEvent) -> None:
         spread = self._spread_bps(event)
@@ -485,8 +627,8 @@ class LiveOrderflowStore:
         self._historical = self._historical.with_window("amplitude_1m", self._current_atr(event.price))
 
     def _current_atr(self, fallback_price: float) -> float:
-        if self._atr_1m.latest_atr > 0:
-            return self._atr_1m.latest_atr
+        if self._atr_1m_value > 0:
+            return self._atr_1m_value
         return max(fallback_price * 0.002, self._bin_size / 2)
 
     def _try_signal(self, event: TradeEvent, received_at: int) -> None:
@@ -561,7 +703,7 @@ class LiveOrderflowStore:
             delta_60s=self._last_delta_60s,
             volume_30s=self._last_volume_30s,
             profile_levels=tuple(self._profile_levels(event.timestamp)),
-            atr_3m_14=self._atr_3m.latest_atr,
+            atr_3m_14=self._atr_3m_value,
             cumulative_delta=self._cumulative_delta,
             aggression_bubble_side=bubble.side if bubble else None,
             aggression_bubble_quantity=bubble.quantity if bubble else 0.0,
@@ -608,6 +750,7 @@ class LiveOrderflowStore:
             "entry_price": signal.entry_price,
             "stop_price": signal.stop_price,
             "target_price": signal.target_price,
+            "target_r_multiple": signal.target_r_multiple,
             "confidence": signal.confidence,
             "reasons": list(signal.reasons),
         }
@@ -699,6 +842,7 @@ class LiveOrderflowStore:
             "stop_price": signal.stop_price,
             "initial_stop_price": signal.stop_price,
             "target_price": signal.target_price,
+            "target_r_multiple": signal.target_r_multiple,
             "entry_fee": fill["fee"],
             "opened_at": event.timestamp,
             "break_even_shifted": False,
@@ -728,6 +872,7 @@ class LiveOrderflowStore:
             "limit_price": pending["limit_price"],
             "stop_price": signal.stop_price,
             "target_price": signal.target_price,
+            "target_r_multiple": signal.target_r_multiple,
             "status": "filled",
             "fee": fill["fee"],
             "slippage_bps": 0.0,
@@ -750,11 +895,8 @@ class LiveOrderflowStore:
         if self._position is None:
             return False
         self._update_max_moves(event.price)
-        if self._take_partial_profit(event):
-            self._update_trailing_stop(event)
-            return True
         self._shift_stop_to_break_even(event)
-        self._update_trailing_stop(event)
+        self._shift_stop_after_kline_momentum(event)
         self._reduce_for_absorption(event)
         return self._close_for_orderflow_invalidation(event)
 
@@ -776,11 +918,15 @@ class LiveOrderflowStore:
         initial_stop = float(position.get("initial_stop_price") or position["stop_price"])
         entry = float(position["entry_price"])
         side = position["side"]
+        target_r_multiple = float(position.get("target_r_multiple") or self.settings.execution.reward_risk)
+        round_trip_cost = estimated_round_trip_cost(entry, self._instrument.taker_fee_rate)
         stop_price = break_even_stop_price(
             side,
             entry_price=entry,
             initial_stop_price=initial_stop,
             current_price=event.price,
+            break_even_trigger_r=target_r_multiple / 2.0,
+            round_trip_cost=round_trip_cost,
         )
         if stop_price is None:
             return
@@ -797,6 +943,45 @@ class LiveOrderflowStore:
                 "timestamp": event.timestamp,
                 "price": stop_price,
                 "label": "BE",
+                "side": side.value,
+            }
+        )
+
+    def _shift_stop_after_kline_momentum(self, event: TradeEvent) -> None:
+        if self._position is None:
+            return
+        position = self._position
+        side = position["side"]
+        stop_price = kline_momentum_stop_price(
+            side,
+            opened_at=int(position.get("opened_at", event.timestamp)),
+            current_stop_price=float(position["stop_price"]),
+            current_price=event.price,
+            closed_klines=tuple(kline for kline in self._klines if kline.interval == "1m" and kline.is_closed),
+            consecutive_bars=self.settings.execution.kline_stop_shift_consecutive_bars,
+            reference_bars=self.settings.execution.kline_stop_shift_reference_bars,
+        )
+        if stop_price is None:
+            return
+        position["stop_price"] = stop_price
+        self._record_protective_action(
+            "kline_momentum_stop_shift",
+            event.timestamp,
+            {
+                "signal_id": position["signal_id"],
+                "side": side.value,
+                "stop_price": stop_price,
+                "trigger_price": event.price,
+                "consecutive_bars": self.settings.execution.kline_stop_shift_consecutive_bars,
+                "reference_bars": self.settings.execution.kline_stop_shift_reference_bars,
+            },
+        )
+        self._markers.append(
+            {
+                "type": "kline_momentum_stop_shift",
+                "timestamp": event.timestamp,
+                "price": stop_price,
+                "label": "1m stop",
                 "side": side.value,
             }
         )
@@ -832,78 +1017,6 @@ class LiveOrderflowStore:
             },
         )
         self._reduce_position(event, reduce_quantity, "absorption_reduce")
-
-    def _take_partial_profit(self, event: TradeEvent) -> bool:
-        if self._position is None or self._position.get("first_take_profit_done"):
-            return False
-        position = self._position
-        entry = float(position["entry_price"])
-        initial_stop = float(position.get("initial_stop_price") or position["stop_price"])
-        side = position["side"]
-        trigger_price = partial_take_profit_price(
-            side,
-            entry_price=entry,
-            initial_stop_price=initial_stop,
-            current_price=event.price,
-            first_take_profit_r=self.settings.execution.first_take_profit_r,
-        )
-        if trigger_price is None:
-            return False
-        reduce_quantity = self._round_quantity(float(position["quantity"]) * self.settings.execution.first_take_profit_ratio)
-        if reduce_quantity <= 0 or reduce_quantity >= float(position["quantity"]):
-            return False
-        trigger_price = self._round_price(trigger_price, "down" if side == SignalSide.LONG else "up")
-        self._reduce_position(event, reduce_quantity, "partial_take_profit", trigger_price=trigger_price)
-        if self._position is not None:
-            self._position["stop_price"] = entry
-            self._position["break_even_shifted"] = True
-            self._position["first_take_profit_done"] = True
-            self._record_protective_action(
-                "break_even_shift",
-                event.timestamp,
-                {"signal_id": self._position["signal_id"], "stop_price": entry, "trigger_price": event.price},
-            )
-        return True
-
-    def _update_trailing_stop(self, event: TradeEvent) -> None:
-        if self._position is None:
-            return
-        position = self._position
-        entry = float(position["entry_price"])
-        initial_stop = float(position.get("initial_stop_price") or position["stop_price"])
-        side = position["side"]
-        trail_stop = trailing_stop_price(
-            side,
-            entry_price=entry,
-            initial_stop_price=initial_stop,
-            current_stop_price=float(position["stop_price"]),
-            current_price=event.price,
-            atr=self._current_atr(event.price),
-            trail_after_r=self.settings.execution.trail_after_r,
-            trail_atr_multiple=self.settings.execution.trail_atr_multiple,
-        )
-        if trail_stop is None:
-            return
-        if side == SignalSide.LONG:
-            trail_stop = self._round_price(trail_stop, "down")
-            if trail_stop > float(position["stop_price"]):
-                position["stop_price"] = trail_stop
-                position["trail_stop_price"] = trail_stop
-                self._record_protective_action(
-                    "trail_stop_update",
-                    event.timestamp,
-                    {"signal_id": position["signal_id"], "stop_price": trail_stop, "trigger_price": event.price},
-                )
-        else:
-            trail_stop = self._round_price(trail_stop, "up")
-            if trail_stop < float(position["stop_price"]):
-                position["stop_price"] = trail_stop
-                position["trail_stop_price"] = trail_stop
-                self._record_protective_action(
-                    "trail_stop_update",
-                    event.timestamp,
-                    {"signal_id": position["signal_id"], "stop_price": trail_stop, "trigger_price": event.price},
-                )
 
     def _close_for_orderflow_invalidation(self, event: TradeEvent) -> bool:
         if self._position is None:
@@ -960,6 +1073,7 @@ class LiveOrderflowStore:
             "stop_price": position["stop_price"],
             "initial_stop_price": position.get("initial_stop_price", position["stop_price"]),
             "target_price": position["target_price"],
+            "target_r_multiple": position.get("target_r_multiple", self.settings.execution.reward_risk),
             "entry_order_type": position.get("entry_order_type", "market"),
             "gross_realized_pnl": gross_pnl,
             "entry_fee": entry_fee,
@@ -1054,6 +1168,7 @@ class LiveOrderflowStore:
             "stop_price": position["stop_price"],
             "initial_stop_price": position.get("initial_stop_price", position["stop_price"]),
             "target_price": position["target_price"],
+            "target_r_multiple": position.get("target_r_multiple", self.settings.execution.reward_risk),
             "entry_order_type": position.get("entry_order_type", "market"),
             "gross_realized_pnl": gross_pnl,
             "entry_fee": position["entry_fee"],
@@ -1178,6 +1293,7 @@ class LiveOrderflowStore:
             exit_fee=close_fill["fee"],
             gross_pnl=gross_pnl,
             net_pnl=net_pnl,
+            target_r_multiple=float(position.get("target_r_multiple", self.settings.execution.reward_risk)),
             break_even_shifted=bool(position.get("break_even_shifted", False)),
             absorption_reduced=bool(position.get("absorption_reduced", False)),
             max_favorable_move=float(position.get("max_favorable_move", 0.0)),
@@ -1238,6 +1354,18 @@ class LiveOrderflowStore:
                 "message": self._connection_message,
                 "reconnect_count": self._reconnect_count,
             },
+            "strategy_params": {
+                "reward_risk": self.settings.execution.reward_risk,
+                "dynamic_reward_risk_enabled": self.settings.execution.dynamic_reward_risk_enabled,
+                "reward_risk_min": self.settings.execution.reward_risk_min,
+                "reward_risk_max": self.settings.execution.reward_risk_max,
+                "atr_stop_mult": self.settings.execution.atr_stop_mult,
+                "kline_stop_shift_consecutive_bars": self.settings.execution.kline_stop_shift_consecutive_bars,
+                "kline_stop_shift_reference_bars": self.settings.execution.kline_stop_shift_reference_bars,
+                "min_stop_cost_mult": self.settings.execution.min_stop_cost_mult,
+                "min_target_cost_mult": self.settings.execution.min_target_cost_mult,
+                "max_holding_ms": self.settings.execution.max_holding_ms,
+            },
             "last_signal_reasons": list(self._last_signal_reasons),
             "last_reject_reasons": list(self._last_reject_reasons),
             "details": to_jsonable(deepcopy(self._details)),
@@ -1281,6 +1409,20 @@ class LiveOrderflowStore:
         self._reconnect_count = int(conn.get("reconnect_count", 0))
         self._last_signal_reasons = tuple(state.get("last_signal_reasons", ()))
         self._last_reject_reasons = tuple(state.get("last_reject_reasons", ()))
+        strat = state.get("strategy_params")
+        if strat:
+            self.update_strategy_params(
+                reward_risk=strat.get("reward_risk"),
+                dynamic_reward_risk_enabled=strat.get("dynamic_reward_risk_enabled"),
+                reward_risk_min=strat.get("reward_risk_min"),
+                reward_risk_max=strat.get("reward_risk_max"),
+                atr_stop_mult=strat.get("atr_stop_mult"),
+                kline_stop_shift_consecutive_bars=strat.get("kline_stop_shift_consecutive_bars"),
+                kline_stop_shift_reference_bars=strat.get("kline_stop_shift_reference_bars"),
+                min_stop_cost_mult=strat.get("min_stop_cost_mult"),
+                min_target_cost_mult=strat.get("min_target_cost_mult"),
+                max_holding_ms=strat.get("max_holding_ms"),
+            )
         if state.get("details"):
             self._details = state["details"]
             if "live" not in self._details or not self._details["live"]:
@@ -1311,8 +1453,25 @@ class LiveOrderflowStore:
         restored = dict(pos)
         side = restored.get("side", "long")
         if isinstance(side, str):
-            restored["side"] = SignalSide(side)
+            side = SignalSide(side)
+            restored["side"] = side
+        if float(restored.get("target_r_multiple") or 0) <= 0:
+            restored["target_r_multiple"] = self._restored_target_r(
+                float(restored.get("entry_price") or 0),
+                float(restored.get("initial_stop_price") or restored.get("stop_price") or 0),
+                float(restored.get("target_price") or 0),
+                restored["side"],
+            )
         return restored
+
+    def _restored_target_r(self, entry_price: float, stop_price: float, target_price: float, side: SignalSide) -> float:
+        risk = abs(entry_price - stop_price)
+        if risk <= 0:
+            return self.settings.execution.reward_risk
+        reward = target_price - entry_price if side == SignalSide.LONG else entry_price - target_price
+        if reward <= 0:
+            return self.settings.execution.reward_risk
+        return round(reward / risk, 4)
 
     def _restore_from_journal(self) -> dict[str, Any]:
         if self._journal is None or not self._journal.path.exists():
@@ -1363,18 +1522,23 @@ class LiveOrderflowStore:
                     entry_price = float(payload.get("entry_price") or 0)
                     stop_price = float(payload.get("stop_price") or 0)
                     target_price = float(payload.get("target_price") or 0)
+                    side = SignalSide(payload.get("side", "long"))
+                    target_r_multiple = float(payload.get("target_r_multiple") or 0)
+                    if target_r_multiple <= 0:
+                        target_r_multiple = self._restored_target_r(entry_price, stop_price, target_price, side)
                     qty = float(payload.get("quantity") or 0)
                     open_pos = {
                         "signal_id": sid,
                         "symbol": payload.get("symbol", self.symbol),
-                        "side": SignalSide(payload.get("side", "long")),
+                        "side": side,
                         "setup": payload.get("setup", "unknown"),
                         "quantity": qty,
                         "entry_price": entry_price,
-                        "signal_entry_price": entry_price,
+                        "signal_entry_price": float(payload.get("signal_entry_price") or entry_price),
                         "stop_price": stop_price,
                         "initial_stop_price": stop_price,
                         "target_price": target_price,
+                        "target_r_multiple": target_r_multiple,
                         "entry_fee": 0.0,
                         "opened_at": int(event.get("time", 0)),
                         "break_even_shifted": False,
@@ -1428,6 +1592,14 @@ class LiveOrderflowStore:
                     "timestamp": action.get("timestamp", 0),
                     "price": action.get("trigger_price", 0),
                     "label": "Absorb reduce",
+                    "side": action.get("side", "long"),
+                })
+            elif action.get("action") == "kline_momentum_stop_shift":
+                markers.append({
+                    "type": "kline_momentum_stop_shift",
+                    "timestamp": action.get("timestamp", 0),
+                    "price": action.get("stop_price", 0),
+                    "label": "1m stop",
                     "side": action.get("side", "long"),
                 })
         return markers
@@ -1552,7 +1724,7 @@ class LiveOrderflowStore:
                 "volume_30s": self._last_volume_30s,
                 "vwap": self._last_vwap,
                 "atr_1m_14": self._current_atr(last_price or 0),
-                "atr_3m_14": self._atr_3m.latest_atr,
+                "atr_3m_14": self._atr_3m_value,
                 "signals": self._signal_count,
                 "orders": self._order_count,
                 "rejected": self._rejected_count,

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import math
 import time
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -16,18 +18,19 @@ from crypto_perp_tool.execution.fills import (
 )
 from crypto_perp_tool.execution.models import PaperExecutionConfig, PaperOpenPosition, PaperPendingEntry
 from crypto_perp_tool.execution.position_rules import (
+    ONE_MINUTE_MS,
     absorption_should_reduce,
     break_even_stop_price,
-    partial_take_profit_price,
+    estimated_round_trip_cost,
+    kline_momentum_stop_price,
     price_moves,
     should_close_for_orderflow_invalidation,
-    trailing_stop_price,
     triggered_close,
 )
 from crypto_perp_tool.journal import JsonlJournal
-from crypto_perp_tool.market_data import AggressionBubble, AggressionBubbleDetector, AtrTracker, QuoteEvent, TradeEvent
+from crypto_perp_tool.market_data import AggressionBubble, AggressionBubbleDetector, AtrTracker, KlineEvent, QuoteEvent, TradeEvent
 from crypto_perp_tool.market_data.latency import compute_exchange_lag_ms
-from crypto_perp_tool.profile import VolumeProfileEngine
+from crypto_perp_tool.profile import VolumeProfileEngine, build_profile_levels
 from crypto_perp_tool.risk import AccountState, RiskEngine
 from crypto_perp_tool.serialization import to_jsonable
 from crypto_perp_tool.session import SessionDetector
@@ -57,12 +60,29 @@ class PaperTradingEngine:
         self.signal_cooldown_ms = signal_cooldown_ms
         self.taker_fee_rate = taker_fee_rate
         self.settings = default_settings()
-        self.bin_size = self.settings.profile.btc_bin_size if self.symbol == "BTCUSDT" else self.settings.profile.eth_bin_size
-        self.rolling_window_ms = self.settings.profile.rolling_window_minutes * 60 * 1000
-        self.risk = RiskEngine(self.settings.risk)
-        self.signals = SignalEngine(self.settings.signals.min_reward_risk, self.settings.execution.max_data_lag_ms,
-                                    session_gating_enabled=self.settings.signals.session_gating_enabled)
         self.execution_config = execution_config or PaperExecutionConfig()
+        self.bin_size = self.settings.profile.btc_bin_size if self.symbol == "BTCUSDT" else self.settings.profile.eth_bin_size
+        self.execution_window_ms = self.settings.profile.execution_window_minutes * 60 * 1000
+        self.micro_window_ms = self.settings.profile.micro_window_minutes * 60 * 1000
+        self.context_window_ms = self.settings.profile.context_window_minutes * 60 * 1000
+        self.rolling_window_ms = self.execution_window_ms
+        self.risk = RiskEngine(self.settings.risk)
+        self.signals = SignalEngine(
+            self.settings.signals.min_reward_risk,
+            self.settings.execution.max_data_lag_ms,
+            session_gating_enabled=self.settings.signals.session_gating_enabled,
+            reward_risk=self.execution_config.reward_risk,
+            dynamic_reward_risk_enabled=self.execution_config.dynamic_reward_risk_enabled,
+            reward_risk_min=self.execution_config.reward_risk_min,
+            reward_risk_max=self.execution_config.reward_risk_max,
+            atr_stop_mult=self.execution_config.atr_stop_mult,
+            min_stop_cost_mult=self.execution_config.min_stop_cost_mult,
+            min_target_cost_mult=self.execution_config.min_target_cost_mult,
+            taker_fee_rate=self.taker_fee_rate,
+            execution_window=f"execution_{self.settings.profile.execution_window_minutes}m",
+            micro_window=f"micro_{self.settings.profile.micro_window_minutes}m",
+            context_window=f"context_{self.settings.profile.context_window_minutes}m",
+        )
         self.journal = JsonlJournal(journal_path, config_version=self.settings.config_version) if journal_path is not None else None
         self._events: list[TradeEvent] = []
         self._rolling_delta: list[float] = []
@@ -77,6 +97,7 @@ class PaperTradingEngine:
         self._last_event_time = 0
         self._last_received_at = 0
         self._last_exchange_lag_ms = 0
+        self._last_reject_reasons: tuple[str, ...] = ()
         self._last_delta_15s = 0.0
         self._last_delta_30s = 0.0
         self._last_delta_60s = 0.0
@@ -93,6 +114,8 @@ class PaperTradingEngine:
         self._last_bubble: AggressionBubble | None = None
         self._atr_1m = AtrTracker(bar_ms=60_000, period=self.settings.signals.atr_period)
         self._atr_3m = AtrTracker(bar_ms=3 * 60_000, period=self.settings.signals.atr_period)
+        self._current_1m_kline: KlineEvent | None = None
+        self._completed_1m_klines: list[KlineEvent] = []
         self._session_detector = SessionDetector(
             asia_start_hour=self.settings.profile.asia_start_hour,
             asia_end_hour=self.settings.profile.asia_end_hour,
@@ -127,12 +150,13 @@ class PaperTradingEngine:
             received_at=received_at,
         )
         self._events.append(event)
+        self._update_trade_1m_kline(event)
         self._cumulative_delta += event.delta
         self._atr_1m.update(event)
         self._atr_3m.update(event)
         self._profile_engine.add_trade(event.price, event.quantity, timestamp=event.timestamp)
         if event.timestamp - self._last_profile_prune > 60_000:
-            self._profile_engine.prune(event.timestamp - self.rolling_window_ms)
+            self._profile_engine.prune(event.timestamp - self.context_window_ms)
             self._last_profile_prune = event.timestamp
         self._record_aggression_bubble(event)
         self._rolling_delta.append(event.delta)
@@ -155,6 +179,11 @@ class PaperTradingEngine:
         snapshot = self._snapshot(event, quote, received_at)
         signal = self.signals.evaluate(snapshot)
         if signal is None:
+            reasons = tuple(getattr(self.signals, "last_reject_reasons", ()) or ())
+            if reasons:
+                self._last_reject_reasons = reasons
+                if self.journal is not None and reasons != ("no_setup",):
+                    self._write_journal("signal_rejected", {"symbol": self.symbol, "reject_reasons": reasons})
             self._refresh_pnl_ranges()
             return
 
@@ -162,6 +191,7 @@ class PaperTradingEngine:
         decision = self.risk.evaluate(signal, self._account_state())
         self._write_journal("risk_decision", {"decision": decision})
         if not decision.allowed:
+            self._last_reject_reasons = decision.reject_reasons
             self._refresh_pnl_ranges()
             return
 
@@ -198,6 +228,10 @@ class PaperTradingEngine:
                 "open_position": self._position,
                 "risk_events": list(paper["risk_events"]),
                 "protective_actions": list(paper["protective_actions"]),
+                "reject_reasons": self._last_reject_reasons,
+                "profile_window": f"execution_{self.settings.profile.execution_window_minutes}m",
+                "micro_profile_window": f"micro_{self.settings.profile.micro_window_minutes}m",
+                "context_profile_window": f"context_{self.settings.profile.context_window_minutes}m",
             }
         )
 
@@ -268,6 +302,47 @@ class PaperTradingEngine:
             return self._atr_1m.latest_atr
         return max(fallback_price * 0.002, self.bin_size / 2)
 
+    def _update_trade_1m_kline(self, event: TradeEvent) -> None:
+        bucket_start = (event.timestamp // ONE_MINUTE_MS) * ONE_MINUTE_MS
+        if self._current_1m_kline is None:
+            self._current_1m_kline = self._new_trade_1m_kline(event, bucket_start)
+            return
+
+        if bucket_start < self._current_1m_kline.timestamp:
+            return
+        if bucket_start > self._current_1m_kline.timestamp:
+            self._completed_1m_klines.append(replace(self._current_1m_kline, is_closed=True))
+            self._completed_1m_klines = self._completed_1m_klines[-128:]
+            self._current_1m_kline = self._new_trade_1m_kline(event, bucket_start)
+            return
+
+        current = self._current_1m_kline
+        self._current_1m_kline = replace(
+            current,
+            high=max(current.high, event.price),
+            low=min(current.low, event.price),
+            close=event.price,
+            volume=current.volume + event.quantity,
+            quote_volume=current.quote_volume + event.price * event.quantity,
+            trade_count=current.trade_count + 1,
+        )
+
+    def _new_trade_1m_kline(self, event: TradeEvent, bucket_start: int) -> KlineEvent:
+        return KlineEvent(
+            timestamp=bucket_start,
+            close_time=bucket_start + ONE_MINUTE_MS - 1,
+            symbol=event.symbol.upper(),
+            interval="1m",
+            open=event.price,
+            high=event.price,
+            low=event.price,
+            close=event.price,
+            volume=event.quantity,
+            quote_volume=event.price * event.quantity,
+            trade_count=1,
+            is_closed=False,
+        )
+
     def _session_value(self, timestamp_ms: int) -> str:
         if timestamp_ms < 86_400_000:
             return "unknown"
@@ -295,7 +370,91 @@ class PaperTradingEngine:
         )
 
     def _profile_levels(self, timestamp: int):
-        return self._profile_engine.levels("rolling_4h")
+        settings = self.settings.profile
+        if timestamp != self._last_event_time:
+            return self._profile_levels_from_trade_list(timestamp)
+        return (
+            *self._profile_levels_from_engine(
+                timestamp,
+                self.execution_window_ms,
+                f"rolling_{settings.execution_window_minutes}m",
+                f"execution_{settings.execution_window_minutes}m",
+                min_trades=settings.min_execution_profile_trades,
+                min_bins=settings.min_profile_bins,
+            ),
+            *self._profile_levels_from_engine(
+                timestamp,
+                self.micro_window_ms,
+                f"rolling_{settings.micro_window_minutes}m",
+                f"micro_{settings.micro_window_minutes}m",
+                min_trades=settings.min_micro_profile_trades,
+                min_bins=settings.min_profile_bins,
+            ),
+            *self._profile_levels_from_engine(
+                timestamp,
+                self.context_window_ms,
+                f"rolling_{settings.context_window_minutes}m",
+                f"context_{settings.context_window_minutes}m",
+            ),
+        )
+
+    def _profile_levels_from_engine(
+        self,
+        timestamp: int,
+        window_ms: int,
+        window_name: str,
+        label: str,
+        *,
+        min_trades: int = 0,
+        min_bins: int = 0,
+    ):
+        events = [event for event in self._events if 0 <= timestamp - event.timestamp <= window_ms]
+        if len(events) < min_trades:
+            return ()
+        if min_bins > 0:
+            bins = {math.floor(event.price / self.bin_size) * self.bin_size for event in events}
+            if len(bins) < min_bins:
+                return ()
+        previous_reference = self._profile_engine._reference_ms
+        self._profile_engine._reference_ms = timestamp
+        try:
+            return tuple(replace(level, window=label) for level in self._profile_engine.levels(window=window_name))
+        finally:
+            self._profile_engine._reference_ms = previous_reference
+
+    def _profile_levels_from_trade_list(self, timestamp: int):
+        trades = [(event.price, event.quantity, event.timestamp) for event in self._events]
+        settings = self.settings.profile
+        return (
+            *build_profile_levels(
+                trades,
+                timestamp=timestamp,
+                window_ms=self.execution_window_ms,
+                label=f"execution_{settings.execution_window_minutes}m",
+                bin_size=self.bin_size,
+                value_area_ratio=settings.value_area_ratio,
+                min_trades=settings.min_execution_profile_trades,
+                min_bins=settings.min_profile_bins,
+            ),
+            *build_profile_levels(
+                trades,
+                timestamp=timestamp,
+                window_ms=self.micro_window_ms,
+                label=f"micro_{settings.micro_window_minutes}m",
+                bin_size=self.bin_size,
+                value_area_ratio=settings.value_area_ratio,
+                min_trades=settings.min_micro_profile_trades,
+                min_bins=settings.min_profile_bins,
+            ),
+            *build_profile_levels(
+                trades,
+                timestamp=timestamp,
+                window_ms=self.context_window_ms,
+                label=f"context_{settings.context_window_minutes}m",
+                bin_size=self.bin_size,
+                value_area_ratio=settings.value_area_ratio,
+            ),
+        )
 
     def _profile_events(self, timestamp: int) -> list[TradeEvent]:
         if timestamp <= 0:
@@ -330,6 +489,7 @@ class PaperTradingEngine:
                 "entry_price": signal.entry_price,
                 "stop_price": signal.stop_price,
                 "target_price": signal.target_price,
+                "target_r_multiple": signal.target_r_multiple,
                 "confidence": signal.confidence,
                 "reasons": list(signal.reasons),
             }
@@ -421,6 +581,7 @@ class PaperTradingEngine:
             stop_price=signal.stop_price,
             initial_stop_price=signal.stop_price,
             target_price=signal.target_price,
+            target_r_multiple=signal.target_r_multiple,
             opened_at=event.timestamp,
             entry_fee=entry_fee,
             initial_quantity=filled_quantity,
@@ -439,6 +600,7 @@ class PaperTradingEngine:
                 "limit_price": pending.limit_price,
                 "stop_price": signal.stop_price,
                 "target_price": signal.target_price,
+                "target_r_multiple": signal.target_r_multiple,
                 "status": order_status,
                 "fill_ratio": fill_ratio,
                 "slippage_bps": 0.0,
@@ -476,6 +638,7 @@ class PaperTradingEngine:
                 "limit_price": pending.limit_price,
                 "stop_price": signal.stop_price,
                 "target_price": signal.target_price,
+                "target_r_multiple": signal.target_r_multiple,
                 "status": order_status,
                 "entry_fee": entry_fee,
             },
@@ -487,11 +650,8 @@ class PaperTradingEngine:
         if self._position is None:
             return False
         self._update_max_moves(event.price)
-        if self._take_partial_profit(event):
-            self._update_trailing_stop(event)
-            return True
         self._shift_stop_to_break_even(event)
-        self._update_trailing_stop(event)
+        self._shift_stop_after_kline_momentum(event)
         self._reduce_for_absorption(event)
         return self._close_for_orderflow_invalidation(event)
 
@@ -502,58 +662,6 @@ class PaperTradingEngine:
         favorable, adverse = price_moves(position.side, position.entry_price, price)
         position.max_favorable_move = max(position.max_favorable_move, favorable)
         position.max_adverse_move = max(position.max_adverse_move, adverse)
-
-    def _take_partial_profit(self, event: TradeEvent) -> bool:
-        if self._position is None or self._position.first_take_profit_done:
-            return False
-        position = self._position
-        trigger_price = partial_take_profit_price(
-            position.side,
-            entry_price=position.entry_price,
-            initial_stop_price=position.initial_stop_price,
-            current_price=event.price,
-            first_take_profit_r=self.execution_config.first_take_profit_r,
-        )
-        if trigger_price is None:
-            return False
-        reduce_quantity = position.quantity * self.execution_config.first_take_profit_ratio
-        if reduce_quantity <= 0 or reduce_quantity >= position.quantity:
-            return False
-        self._reduce_position(event.timestamp, trigger_price, reduce_quantity, "partial_take_profit")
-        if self._position is not None:
-            self._position.stop_price = self._position.entry_price
-            self._position.break_even_shifted = True
-            self._position.first_take_profit_done = True
-            self._record_protective_action(
-                "break_even_shift",
-                event.timestamp,
-                {"signal_id": self._position.signal_id, "stop_price": self._position.stop_price, "trigger_price": event.price},
-            )
-        return True
-
-    def _update_trailing_stop(self, event: TradeEvent) -> None:
-        if self._position is None:
-            return
-        position = self._position
-        trail_stop = trailing_stop_price(
-            position.side,
-            entry_price=position.entry_price,
-            initial_stop_price=position.initial_stop_price,
-            current_stop_price=position.stop_price,
-            current_price=event.price,
-            atr=self._current_atr(event.price),
-            trail_after_r=self.execution_config.trail_after_r,
-            trail_atr_multiple=self.execution_config.trail_atr_multiple,
-        )
-        if trail_stop is None:
-            return
-        position.stop_price = trail_stop
-        position.trail_stop_price = trail_stop
-        self._record_protective_action(
-            "trail_stop_update",
-            event.timestamp,
-            {"signal_id": position.signal_id, "stop_price": trail_stop, "trigger_price": event.price},
-        )
 
     def _close_for_orderflow_invalidation(self, event: TradeEvent) -> bool:
         if self._position is None:
@@ -577,17 +685,49 @@ class PaperTradingEngine:
         if self._position is None or self._position.break_even_shifted:
             return
         position = self._position
+        round_trip_cost = estimated_round_trip_cost(position.entry_price, self.taker_fee_rate)
         stop_price = break_even_stop_price(
             position.side,
             entry_price=position.entry_price,
             initial_stop_price=position.initial_stop_price,
             current_price=event.price,
+            break_even_trigger_r=position.target_r_multiple / 2.0,
+            round_trip_cost=round_trip_cost,
         )
         if stop_price is None:
             return
         position.stop_price = stop_price
         position.break_even_shifted = True
         self._record_protective_action("break_even_shift", event.timestamp, {"signal_id": position.signal_id, "stop_price": position.stop_price})
+
+    def _shift_stop_after_kline_momentum(self, event: TradeEvent) -> None:
+        if self._position is None:
+            return
+        position = self._position
+        stop_price = kline_momentum_stop_price(
+            position.side,
+            opened_at=position.opened_at,
+            current_stop_price=position.stop_price,
+            current_price=event.price,
+            closed_klines=self._completed_1m_klines,
+            consecutive_bars=self.execution_config.kline_stop_shift_consecutive_bars,
+            reference_bars=self.execution_config.kline_stop_shift_reference_bars,
+        )
+        if stop_price is None:
+            return
+        position.stop_price = stop_price
+        self._record_protective_action(
+            "kline_momentum_stop_shift",
+            event.timestamp,
+            {
+                "signal_id": position.signal_id,
+                "side": position.side.value,
+                "stop_price": stop_price,
+                "trigger_price": event.price,
+                "consecutive_bars": self.execution_config.kline_stop_shift_consecutive_bars,
+                "reference_bars": self.execution_config.kline_stop_shift_reference_bars,
+            },
+        )
 
     def _reduce_for_absorption(self, event: TradeEvent) -> None:
         if self._position is None or self._position.absorption_reduced:
@@ -630,6 +770,7 @@ class PaperTradingEngine:
                 "quantity": reduce_quantity, "entry_price": position.entry_price,
                 "close_price": close_fill_price, "stop_price": position.stop_price,
                 "target_price": position.target_price,
+                "target_r_multiple": position.target_r_multiple,
                 "entry_fee": entry_fee_portion,
                 "exit_fee": exit_fee,
                 "gross_pnl": gross_pnl,
@@ -691,6 +832,7 @@ class PaperTradingEngine:
             "stop_price": position.stop_price,
             "initial_stop_price": position.initial_stop_price,
             "target_price": position.target_price,
+            "target_r_multiple": position.target_r_multiple,
             "entry_order_type": position.entry_order_type,
             "entry_fee": position.entry_fee,
             "exit_fee": exit_fee,
@@ -760,6 +902,7 @@ class PaperTradingEngine:
             "stop_price": position.stop_price,
             "initial_stop_price": position.initial_stop_price,
             "target_price": position.target_price,
+            "target_r_multiple": position.target_r_multiple,
             "entry_order_type": position.entry_order_type,
             "entry_fee": entry_fee_portion,
             "exit_fee": exit_fee,
@@ -820,6 +963,7 @@ class PaperTradingEngine:
             "close_price": close_price,
             "stop_price": position.stop_price,
             "target_price": position.target_price,
+            "target_r_multiple": position.target_r_multiple,
             "entry_fee": position.entry_fee,
             "exit_fee": exit_fee,
             "gross_pnl": gross_pnl,
@@ -926,6 +1070,7 @@ class PaperTradingEngine:
                 "entry_price": float(signal.get("entry_price") or 0),
                 "stop_price": float(signal.get("stop_price") or 0),
                 "target_price": float(signal.get("target_price") or 0),
+                "target_r_multiple": float(signal.get("target_r_multiple") or 0),
                 "confidence": float(signal.get("confidence") or 0),
                 "reasons": list(signal.get("reasons") or []),
             }
@@ -950,6 +1095,9 @@ class PaperTradingEngine:
         entry_price = float(order.get("entry_price") or 0)
         stop_price = float(order.get("stop_price") or 0)
         target_price = float(order.get("target_price") or 0)
+        target_r_multiple = float(order.get("target_r_multiple") or 0)
+        if target_r_multiple <= 0:
+            target_r_multiple = self._restored_target_r(entry_price, stop_price, target_price, side)
         signal_id = str(order.get("signal_id") or "")
         status = str(order.get("status") or "filled")
         signal_entry_price = float(order.get("signal_entry_price") or entry_price)
@@ -968,6 +1116,7 @@ class PaperTradingEngine:
                 "limit_price": float(order.get("limit_price") or entry_price),
                 "stop_price": stop_price,
                 "target_price": target_price,
+                "target_r_multiple": target_r_multiple,
                 "status": status,
                 "fill_ratio": float(order.get("fill_ratio") or 1),
                 "slippage_bps": float(order.get("slippage_bps") or 0),
@@ -987,11 +1136,21 @@ class PaperTradingEngine:
             stop_price=stop_price,
             initial_stop_price=stop_price,
             target_price=target_price,
+            target_r_multiple=target_r_multiple,
             opened_at=timestamp,
             entry_fee=float(order.get("entry_fee") or 0),
             initial_quantity=float(order.get("requested_quantity") or quantity),
             entry_order_type=str(order.get("entry_order_type") or "market"),
         )
+
+    def _restored_target_r(self, entry_price: float, stop_price: float, target_price: float, side: SignalSide) -> float:
+        risk = abs(entry_price - stop_price)
+        if risk <= 0:
+            return self.execution_config.reward_risk
+        reward = target_price - entry_price if side == SignalSide.LONG else entry_price - target_price
+        if reward <= 0:
+            return self.execution_config.reward_risk
+        return round(reward / risk, 4)
 
     def _restore_closed_position(self, closed: dict[str, Any], journal_time: int) -> None:
         if not closed:
@@ -1010,6 +1169,7 @@ class PaperTradingEngine:
             "close_price": float(closed.get("close_price") or 0),
             "stop_price": float(closed.get("stop_price") or 0),
             "target_price": float(closed.get("target_price") or 0),
+            "target_r_multiple": float(closed.get("target_r_multiple") or 0),
             "opened_at": int(closed.get("opened_at") or timestamp),
             "exit_reason": str(closed.get("exit_reason") or "unknown"),
             "entry_fee": float(closed.get("entry_fee") or 0),

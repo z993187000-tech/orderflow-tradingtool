@@ -58,7 +58,11 @@ def build_paper_details_from_journal(journal_path: Path) -> dict[str, Any]:
                     "side": signal.get("side"),
                     "setup": signal.get("setup"),
                     "entry_price": signal.get("entry_price"),
+                    "stop_price": signal.get("stop_price"),
+                    "target_price": signal.get("target_price"),
+                    "target_r_multiple": signal.get("target_r_multiple"),
                     "confidence": signal.get("confidence"),
+                    "reasons": signal.get("reasons", []),
                 }
             )
         elif event_type == "paper_order":
@@ -71,6 +75,7 @@ def build_paper_details_from_journal(journal_path: Path) -> dict[str, Any]:
                     "entry_price": payload.get("entry_price"),
                     "stop_price": payload.get("stop_price"),
                     "target_price": payload.get("target_price"),
+                    "target_r_multiple": payload.get("target_r_multiple"),
                 }
             )
         elif event_type in {"position_closed", "position_reduced"}:
@@ -82,6 +87,9 @@ def build_paper_details_from_journal(journal_path: Path) -> dict[str, Any]:
                 "quantity": payload.get("quantity"),
                 "entry_price": payload.get("entry_price"),
                 "close_price": payload.get("close_price"),
+                "stop_price": payload.get("stop_price"),
+                "target_price": payload.get("target_price"),
+                "target_r_multiple": payload.get("target_r_multiple"),
                 "realized_pnl": realized_pnl,
             }
             if payload.get("exit_reason"):
