@@ -113,6 +113,63 @@ class MarketDataHealth:
 
 
 @dataclass(frozen=True)
+class MarketStateResult:
+    state: str
+    direction: str = "neutral"
+    reasons: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class BiasResult:
+    bias: str
+    reasons: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class SetupCandidate:
+    setup_model: str
+    legacy_setup: str
+    side: SignalSide
+    trigger_price: float
+    location: str
+    reasons: tuple[str, ...] = ()
+    invalidation_rules: tuple[str, ...] = ()
+    structure_stop: float | None = None
+    structure_target: float | None = None
+    trigger_time: int = 0
+
+
+@dataclass(frozen=True)
+class ConfirmationResult:
+    confirmed: bool
+    reasons: tuple[str, ...] = ()
+    reject_reason: str = ""
+    confirmed_close: float = 0.0
+    displacement: float = 0.0
+
+
+@dataclass(frozen=True)
+class TradePlan:
+    entry_price: float
+    stop_price: float
+    target_price: float
+    target_source: str
+    reward_risk: float
+    management_profile: str
+
+
+@dataclass(frozen=True)
+class SignalTrace:
+    market_state: MarketStateResult
+    bias: BiasResult
+    location: str
+    trigger: str
+    confirmation: ConfirmationResult | None = None
+    trade_plan: TradePlan | None = None
+    reject_reasons: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class ProfileLevel:
     type: ProfileLevelType
     price: float
@@ -173,6 +230,13 @@ class TradeSignal:
     invalidation_rules: tuple[str, ...]
     created_at: int
     target_r_multiple: float = 5.0
+    setup_model: str = ""
+    legacy_setup: str = ""
+    market_state: str = ""
+    bias: str = ""
+    target_source: str = ""
+    management_profile: str = ""
+    trace: SignalTrace | None = None
 
 
 @dataclass(frozen=True)

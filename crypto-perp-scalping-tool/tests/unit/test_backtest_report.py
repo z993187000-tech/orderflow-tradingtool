@@ -62,6 +62,42 @@ class BacktestReporterTests(unittest.TestCase):
         self.assertEqual(report.by_setup["lvn_break_acceptance"]["trades"], 2)
         self.assertEqual(report.data_quality["closed_positions"], "present")
 
+    def test_report_groups_by_setup_model_market_state_and_session(self):
+        details = {
+            "paper": {
+                "signals": [
+                    {
+                        "setup": "vah_breakout_lvn_pullback_aggression",
+                        "setup_model": "squeeze_continuation",
+                        "market_state": "imbalanced_up",
+                        "session": "london",
+                    }
+                ],
+                "orders": [],
+                "closed_positions": [
+                    {
+                        "timestamp": 1_000,
+                        "opened_at": 500,
+                        "setup": "vah_breakout_lvn_pullback_aggression",
+                        "setup_model": "squeeze_continuation",
+                        "market_state": "imbalanced_up",
+                        "session": "london",
+                        "entry_price": 100.0,
+                        "stop_price": 95.0,
+                        "target_price": 110.0,
+                        "realized_pnl": 25.0,
+                    }
+                ],
+            }
+        }
+
+        report = BacktestReporter(initial_equity=10_000).from_details(details)
+
+        key = "squeeze_continuation|imbalanced_up|london"
+        self.assertIn(key, report.by_strategy_context)
+        self.assertEqual(report.by_strategy_context[key]["trades"], 1)
+        self.assertEqual(report.by_strategy_context[key]["signals"], 1)
+
     def test_empty_report_marks_missing_trade_data(self):
         report = BacktestReporter(initial_equity=10_000).from_details({"paper": {}})
 

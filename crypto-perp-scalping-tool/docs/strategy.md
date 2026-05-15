@@ -488,3 +488,68 @@ execution:
 3. **Level 计算算法改动**（`profile/engine.py`）→ 必须更新第 2.2 节
 4. **时段划分改动** → 必须更新第 4 节
 5. Code review 时对照本文档验证代码实现
+
+---
+
+## 12. 实盘状态机 Pipeline 更新
+
+当前信号逻辑已经从“固定 8 个 setup 顺序扫描”升级为状态机 pipeline：
+
+```text
+MarketStateEngine
+  -> BiasEngine
+  -> SetupCandidateEngine
+  -> ConfirmationGate
+  -> TradePlanBuilder
+  -> RiskEngine
+  -> PaperTradingEngine
+```
+
+`SignalEngine.evaluate(...)` 对外接口保持兼容，但内部只负责 orchestration。每次评估会保留 `last_trace` 和 `last_reject_reasons`，用于复盘当前为什么允许、拒绝或没有交易。
+
+### 12.1 市场状态
+
+`signals/market_state.py` 将行情归类为：
+
+- `balanced`：价值区内反复成交，POC 附近吸附。
+- `imbalanced_up` / `imbalanced_down`：价格在 VAH 上方或 VAL 下方被接受，订单流同向。
+- `compression`：完整 1m K range 收缩且靠近关键位。
+- `absorption`：大 delta 或大单成交但价格位移不足。
+- `failed_auction`：刺破 VAH/VAL/HVN/LVN 后在确认窗口内收回。
+- `no_trade`：数据、spread、profile、资金费率或状态冲突不允许开仓。
+
+### 12.2 Bias 与 4 类实盘模型
+
+`signals/bias.py` 只输出方向叙事：`long`、`short` 或 `neutral`。Bias 不能直接开仓，只决定哪些 candidate 可以进入确认层。
+
+旧 setup 名称作为 `legacy_setup` 保留，实盘模型收敛为：
+
+| 实盘模型 | 用途 |
+|------|------|
+| `squeeze_continuation` | value 外接受后的延续突破，要求反向主动盘失败和 1m 收盘确认 |
+| `failed_auction_reversal` | 刺破关键位后无法延续并收回 value/level 内侧 |
+| `lvn_acceptance` | 穿越 LVN 后站稳外侧，delta/volume 同向 |
+| `absorption_response` | 大成交无位移，作为反向 candidate 或持仓减仓/退出条件 |
+
+### 12.3 Confirmation Gate
+
+所有实盘 setup 默认必须通过完整 1m K 收盘确认。Long 条件为最近完整 1m close 高于 trigger + buffer，`delta_30s > 0`，`volume_30s` 放大，触发到确认的位移达到 ATR 阈值，且确认后没有快速跌回 trigger 下方。Short 完全对称。
+
+这意味着 tick 刺破不再直接产生信号；没有完整 1m close 时会记录 `candle_close_not_confirmed`。
+
+### 12.4 结构优先交易计划
+
+`signals/trade_plan.py` 优先使用前方结构目标：`context_60m` 的 POC/HVN/VAH/VAL，其次 `execution_30m`，再到 session high/low 或前高前低。没有可用结构目标时才回退到 capped R multiple。
+
+止损优先放在 failed auction high/low、LVN/HVN/value edge 或确认 1m K high/low 的保护侧，ATR buffer 只做补充保护。
+
+### 12.5 Setup-aware Paper 管理
+
+Paper position 保存 `setup_model` 和 `management_profile`：
+
+- `squeeze_continuation`：1.25R 触发保本，突破后无 follow-through 会超时退出。
+- `failed_auction_reversal`：到 POC/value mid 优先兑现，重新突破失败点则退出。
+- `lvn_acceptance`：回到 LVN 内侧退出，前方 HVN/POC 优先止盈。
+- `absorption_response`：反向 delta 放大但无位移时减仓或退出。
+
+Dashboard 和 backtest 现在会输出 `market_state`、`bias`、`setup_model`、`target_source` 和 `last_reject_reasons`，回测报告按 `setup_model|market_state|session` 聚合。

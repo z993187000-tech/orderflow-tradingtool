@@ -1,7 +1,19 @@
 import time
 import unittest
 
-from crypto_perp_tool.types import HistoricalWindows, MarketDataHealth, MarketSnapshot
+from crypto_perp_tool.serialization import to_jsonable
+from crypto_perp_tool.types import (
+    BiasResult,
+    ConfirmationResult,
+    HistoricalWindows,
+    MarketDataHealth,
+    MarketSnapshot,
+    MarketStateResult,
+    SetupCandidate,
+    SignalSide,
+    SignalTrace,
+    TradePlan,
+)
 
 
 class HistoricalWindowsTests(unittest.TestCase):
@@ -92,6 +104,51 @@ class MarketSnapshotTests(unittest.TestCase):
         )
 
         self.assertEqual(snapshot.exchange_lag_ms, 375)
+
+
+class StrategyPipelineTypeTests(unittest.TestCase):
+    def test_strategy_pipeline_types_are_jsonable(self):
+        candidate = SetupCandidate(
+            setup_model="squeeze_continuation",
+            legacy_setup="vah_breakout_lvn_pullback_aggression",
+            side=SignalSide.LONG,
+            trigger_price=101.0,
+            location="above_value",
+            reasons=("seller aggression failed",),
+        )
+        confirmation = ConfirmationResult(
+            confirmed=True,
+            reasons=("1m close confirmed",),
+            confirmed_close=102.0,
+            displacement=1.0,
+        )
+        plan = TradePlan(
+            entry_price=102.0,
+            stop_price=100.0,
+            target_price=108.0,
+            target_source="context_60m_HVN",
+            reward_risk=3.0,
+            management_profile="squeeze",
+        )
+        trace = SignalTrace(
+            market_state=MarketStateResult(state="imbalanced_up", direction="long", reasons=("above VAH",)),
+            bias=BiasResult(bias="long", reasons=("value accepted higher",)),
+            location="above_value",
+            trigger="breakout",
+            confirmation=confirmation,
+            trade_plan=plan,
+            reject_reasons=(),
+        )
+
+        payload = to_jsonable({
+            "candidate": candidate,
+            "trace": trace,
+        })
+
+        self.assertEqual(payload["candidate"]["setup_model"], "squeeze_continuation")
+        self.assertEqual(payload["candidate"]["side"], "long")
+        self.assertEqual(payload["trace"]["market_state"]["state"], "imbalanced_up")
+        self.assertEqual(payload["trace"]["trade_plan"]["target_source"], "context_60m_HVN")
 
 
 if __name__ == "__main__":

@@ -333,3 +333,62 @@ not connected to trading engine
 - 连续失败达到 10 次后 poller 自动停止，并写入 `telegram_poller_max_errors` journal 事件。
 - 轮询间隔默认 2 秒，错误后指数退避到最大 30 秒。
 - Telegram API HTTP 429（频率限制）时自动等待后重试。
+
+## 实盘状态机策略输出
+
+当前 paper/live dashboard/backtest 使用同一套信号 pipeline：
+
+```text
+MarketStateEngine -> BiasEngine -> SetupCandidateEngine -> ConfirmationGate -> TradePlanBuilder -> RiskEngine -> PaperTradingEngine
+```
+
+运行方式不变，默认仍是 paper：
+
+```powershell
+$env:PYTHONPATH='src'
+python -m crypto_perp_tool.cli web serve --source binance --symbol BTCUSDT --port 8000
+```
+
+或者回放：
+
+```powershell
+$env:PYTHONPATH='src'
+python -m crypto_perp_tool.cli backtest run --csv data/sample_trades.csv --symbol BTCUSDT --equity 10000
+```
+
+### 新增复盘字段
+
+`/api/orderflow` 的 `summary` 现在包含：
+
+- `market_state`：当前市场状态，例如 `imbalanced_up`、`failed_auction`、`absorption`。
+- `bias`：当前方向叙事，`long`、`short` 或 `neutral`。
+- `last_reject_reasons`：最近一次没有出信号的原因。
+
+signal/order/closed position 记录追加：
+
+- `setup_model`
+- `legacy_setup`
+- `market_state`
+- `bias`
+- `target_source`
+- `management_profile`
+
+Backtest report 追加 `by_strategy_context`，按 `setup_model|market_state|session` 聚合，便于复盘哪类状态和时段真正有正期望。
+
+### 4 类实盘模型
+
+- `squeeze_continuation`：value 外接受后的延续突破，必须等完整 1m K 收盘确认。
+- `failed_auction_reversal`：刺破关键位后无法延续，回到 value/level 内侧。
+- `lvn_acceptance`：穿越 LVN 后站稳外侧，delta/volume 同向。
+- `absorption_response`：大成交无位移，用作反向响应或持仓减仓/退出。
+
+### 常见 reject reason
+
+- `candle_close_not_confirmed`：只有 tick 刺破，没有完整 1m K 收盘确认。
+- `delta_not_confirmed`：价格确认但订单流没有同向跟随。
+- `volume_not_confirmed`：确认窗口成交量不足。
+- `insufficient_displacement`：触发后位移低于 ATR 阈值。
+- `trigger_reclaimed`：确认后快速回到 trigger 内侧。
+- `structure_reward_risk_too_low`：明确结构目标太近，R:R 不足。
+
+这些 reject reason 是策略复盘的一部分，不代表系统异常。

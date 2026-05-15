@@ -6,7 +6,7 @@ from pathlib import Path
 
 from crypto_perp_tool.config import default_settings
 from crypto_perp_tool.journal import JsonlJournal, TradeLogger
-from crypto_perp_tool.market_data import TradeEvent
+from crypto_perp_tool.market_data import KlineEvent, TradeEvent
 from crypto_perp_tool.profile import build_profile_levels
 from crypto_perp_tool.risk import AccountState, RiskEngine
 from crypto_perp_tool.signals import SignalEngine
@@ -119,7 +119,7 @@ class PaperRunner:
                 volume_30s=sum(abs(delta) for delta in rolling_delta[-30:]),
                 profile_levels=levels,
             )
-            signal = self.signals.evaluate(snapshot)
+            signal = self.signals.evaluate(snapshot, klines=self._closed_1m_klines(seen_events, event.timestamp))
             if signal is None:
                 continue
 
@@ -246,6 +246,37 @@ class PaperRunner:
                 value_area_ratio=settings.value_area_ratio,
             ),
         )
+
+    def _closed_1m_klines(self, events: list[TradeEvent], timestamp: int) -> tuple[KlineEvent, ...]:
+        current_bucket = (timestamp // 60_000) * 60_000
+        buckets: dict[int, list[TradeEvent]] = {}
+        for event in events:
+            bucket = (event.timestamp // 60_000) * 60_000
+            if bucket >= current_bucket:
+                continue
+            buckets.setdefault(bucket, []).append(event)
+        klines: list[KlineEvent] = []
+        for bucket, bucket_events in sorted(buckets.items()):
+            prices = [event.price for event in bucket_events]
+            volume = sum(event.quantity for event in bucket_events)
+            quote_volume = sum(event.quantity * event.price for event in bucket_events)
+            klines.append(
+                KlineEvent(
+                    timestamp=bucket,
+                    close_time=bucket + 59_999,
+                    symbol=bucket_events[-1].symbol,
+                    interval="1m",
+                    open=bucket_events[0].price,
+                    high=max(prices),
+                    low=min(prices),
+                    close=bucket_events[-1].price,
+                    volume=volume,
+                    quote_volume=quote_volume,
+                    trade_count=len(bucket_events),
+                    is_closed=True,
+                )
+            )
+        return tuple(klines)
 
     def _close_trigger(self, position: PaperPosition, price: float) -> tuple[str | None, float | None]:
         if position.side == SignalSide.LONG:
