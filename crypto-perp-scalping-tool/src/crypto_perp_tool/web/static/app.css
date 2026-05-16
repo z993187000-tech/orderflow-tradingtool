@@ -396,6 +396,35 @@ button {
   margin-bottom: 10px;
 }
 
+.chart-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.kline-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #171717;
+}
+
+.kline-tabs button {
+  min-width: 38px;
+  height: 26px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  padding: 0 8px;
+}
+
+.kline-tabs button.is-active {
+  background: var(--panel-2);
+  color: var(--text);
+}
+
 canvas {
   width: 100%;
   background: #171717;

@@ -35,7 +35,7 @@ class SignalEngine:
         atr_stop_mult: float = 0.35,
         min_stop_cost_mult: float = 3.0,
         min_target_cost_mult: float = 8.0,
-        taker_fee_rate: float = 0.0004,
+        taker_fee_rate: float = 0.00018,
         execution_window: str = "execution_30m",
         micro_window: str = "micro_15m",
         context_window: str = "context_60m",

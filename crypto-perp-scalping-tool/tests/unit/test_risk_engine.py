@@ -24,60 +24,12 @@ class RiskEngineTests(unittest.TestCase):
 
         decision = engine.evaluate(
             signal,
-            AccountState(equity=10_000, realized_pnl_today=0, consecutive_losses=0),
+            AccountState(equity=10_000),
         )
 
         self.assertTrue(decision.allowed)
         self.assertEqual(decision.quantity, 25.0)
         self.assertEqual(decision.reject_reasons, ())
-
-    def test_risk_engine_testing_mode_skips_loss_and_consecutive_checks(self):
-        engine = RiskEngine(default_settings().risk, testing_mode=True)
-        signal = TradeSignal(
-            id="sig-3",
-            symbol="ETHUSDT",
-            side=SignalSide.SHORT,
-            setup="hvn_vah_failed_breakout",
-            entry_price=2000.0,
-            stop_price=2010.0,
-            target_price=1980.0,
-            confidence=0.65,
-            reasons=("failed breakout",),
-            invalidation_rules=("accepted above VAH",),
-            created_at=3,
-        )
-
-        decision = engine.evaluate(
-            signal,
-            AccountState(equity=10_000, realized_pnl_today=-200, consecutive_losses=5),
-        )
-
-        self.assertTrue(decision.allowed)
-        self.assertEqual(decision.reject_reasons, ())
-
-    def test_risk_engine_rejects_daily_loss_breach(self):
-        engine = RiskEngine(default_settings().risk)
-        signal = TradeSignal(
-            id="sig-2",
-            symbol="ETHUSDT",
-            side=SignalSide.SHORT,
-            setup="hvn_vah_failed_breakout",
-            entry_price=2000.0,
-            stop_price=2010.0,
-            target_price=1980.0,
-            confidence=0.65,
-            reasons=("failed breakout",),
-            invalidation_rules=("accepted above VAH",),
-            created_at=2,
-        )
-
-        decision = engine.evaluate(
-            signal,
-            AccountState(equity=10_000, realized_pnl_today=-100, consecutive_losses=0),
-        )
-
-        self.assertFalse(decision.allowed)
-        self.assertIn("daily_loss_limit_reached", decision.reject_reasons)
 
 
 if __name__ == "__main__":

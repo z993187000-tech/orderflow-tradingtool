@@ -188,7 +188,7 @@ class CliTests(unittest.TestCase):
             "invalidation_rules": ["back below LVN"],
             "created_at": 1,
         }
-        account = {"equity": 10000, "realized_pnl_today": 0, "consecutive_losses": 0}
+        account = {"equity": 10000}
 
         with tempfile.TemporaryDirectory() as tmp:
             input_path = Path(tmp) / "risk.json"

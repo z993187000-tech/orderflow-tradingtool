@@ -30,6 +30,7 @@ class WebStaticUiTests(unittest.TestCase):
             'id="backtestForm"',
             'id="backtestCsvPath"',
             'id="backtestReport"',
+            "服务器 CSV 路径",
         ]:
             self.assertIn(fragment, html)
 
@@ -198,6 +199,19 @@ class WebStaticUiTests(unittest.TestCase):
         self.assertIn("fallbackSlotWidth", js)
         self.assertIn("drawKlines(ctx, visibleKlines, scale, chartRight, minTs, maxTs)", js)
         self.assertNotIn("Math.min(slotWidth * 0.7, 12)", js)
+
+    def test_price_chart_can_select_1m_3m_5m_klines(self):
+        html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+        js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+        css = (STATIC_DIR / "app.css").read_text(encoding="utf-8")
+
+        for interval in ["1m", "3m", "5m"]:
+            self.assertIn(f'data-kline-interval="{interval}"', html)
+        self.assertIn("klineInterval", js)
+        self.assertIn("selectedKlines", js)
+        self.assertIn("kline.interval === priceView.klineInterval", js)
+        self.assertIn("bindKlineIntervalControls", js)
+        self.assertIn(".kline-tabs", css)
 
     def test_price_chart_supports_mouse_zoom_and_drag(self):
         js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")

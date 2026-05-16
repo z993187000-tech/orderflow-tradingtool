@@ -12,6 +12,7 @@ from crypto_perp_tool.execution.position_rules import (
     absorption_should_reduce,
     break_even_stop_price,
     kline_momentum_stop_price,
+    max_holding_reduced_target_price,
     partial_take_profit_price,
     price_moves,
     should_close_for_orderflow_invalidation,
@@ -65,7 +66,7 @@ class ExecutionFillHelperTests(unittest.TestCase):
 
 
 class PositionRuleHelperTests(unittest.TestCase):
-    def test_triggered_close_identifies_stop_target_and_time_stop(self):
+    def test_triggered_close_identifies_stop_and_target_without_time_stop(self):
         self.assertEqual(
             triggered_close(
                 SignalSide.LONG,
@@ -113,7 +114,35 @@ class PositionRuleHelperTests(unittest.TestCase):
                 timestamp=12_000,
                 max_holding_ms=10_000,
             ),
-            (100, "time_stop"),
+            (None, None),
+        )
+
+    def test_max_holding_reduced_target_steps_down_to_breakeven_floor(self):
+        self.assertEqual(
+            max_holding_reduced_target_price(
+                SignalSide.LONG,
+                entry_price=100,
+                initial_stop_price=90,
+                current_target_r_multiple=3.0,
+                elapsed_ms=20_000,
+                max_holding_ms=10_000,
+                completed_reductions=0,
+                round_trip_cost=0.5,
+            ),
+            (110.0, 1.0, 2),
+        )
+        self.assertEqual(
+            max_holding_reduced_target_price(
+                SignalSide.SHORT,
+                entry_price=100,
+                initial_stop_price=110,
+                current_target_r_multiple=1.0,
+                elapsed_ms=30_000,
+                max_holding_ms=10_000,
+                completed_reductions=0,
+                round_trip_cost=0.5,
+            ),
+            (99.5, 0.05, 3),
         )
 
     def test_position_management_calculations_are_side_aware(self):
@@ -175,14 +204,14 @@ class PositionRuleHelperTests(unittest.TestCase):
             )
         )
 
-    def test_kline_momentum_stop_shift_uses_completed_1m_reference_bars_side_aware(self):
+    def test_kline_momentum_stop_shift_waits_for_pullback_confirmation(self):
         long_bars = [
             KlineEvent(0, 59_999, "BTCUSDT", "1m", 98, 105, 97, 104, 10, 1_000, 5, True),
             KlineEvent(60_000, 119_999, "BTCUSDT", "1m", 100, 108, 99, 104, 10, 1_000, 5, True),
             KlineEvent(120_000, 179_999, "BTCUSDT", "1m", 104, 109, 102, 107, 10, 1_000, 5, True),
             KlineEvent(180_000, 239_999, "BTCUSDT", "1m", 107, 112, 105, 111, 10, 1_000, 5, True),
         ]
-        self.assertEqual(
+        self.assertIsNone(
             kline_momentum_stop_price(
                 SignalSide.LONG,
                 opened_at=30_000,
@@ -191,8 +220,7 @@ class PositionRuleHelperTests(unittest.TestCase):
                 closed_klines=long_bars,
                 consecutive_bars=3,
                 reference_bars=2,
-            ),
-            102,
+            )
         )
         self.assertIsNone(
             kline_momentum_stop_price(
@@ -211,7 +239,7 @@ class PositionRuleHelperTests(unittest.TestCase):
             KlineEvent(120_000, 179_999, "BTCUSDT", "1m", 108, 109, 103, 105, 10, 1_000, 5, True),
             KlineEvent(180_000, 239_999, "BTCUSDT", "1m", 105, 106, 100, 101, 10, 1_000, 5, True),
         ]
-        self.assertEqual(
+        self.assertIsNone(
             kline_momentum_stop_price(
                 SignalSide.SHORT,
                 opened_at=30_000,
@@ -220,8 +248,83 @@ class PositionRuleHelperTests(unittest.TestCase):
                 closed_klines=short_bars,
                 consecutive_bars=3,
                 reference_bars=2,
+            )
+        )
+
+    def test_kline_momentum_waits_for_supported_bearish_pullback_after_three_bull_bars(self):
+        bull_run = [
+            KlineEvent(60_000, 119_999, "BTCUSDT", "1m", 100, 106, 99, 105, 100, 10_500, 5, True),
+            KlineEvent(120_000, 179_999, "BTCUSDT", "1m", 105, 110, 104, 109, 120, 12_900, 5, True),
+            KlineEvent(180_000, 239_999, "BTCUSDT", "1m", 109, 113, 108, 112, 110, 12_210, 5, True),
+        ]
+        self.assertIsNone(
+            kline_momentum_stop_price(
+                SignalSide.LONG,
+                opened_at=30_000,
+                current_stop_price=95,
+                current_price=113,
+                closed_klines=bull_run,
+                consecutive_bars=3,
+                reference_bars=2,
+            )
+        )
+
+        supported_pullback = [
+            *bull_run,
+            KlineEvent(240_000, 299_999, "BTCUSDT", "1m", 112, 113, 106, 110, 95, 10_450, 5, True),
+        ]
+        self.assertEqual(
+            kline_momentum_stop_price(
+                SignalSide.LONG,
+                opened_at=30_000,
+                current_stop_price=95,
+                current_price=111,
+                closed_klines=supported_pullback,
+                consecutive_bars=3,
+                reference_bars=2,
             ),
-            109,
+            99,
+        )
+
+    def test_kline_momentum_ignores_bearish_pullback_without_lower_wick_support(self):
+        bars = [
+            KlineEvent(60_000, 119_999, "BTCUSDT", "1m", 100, 106, 99, 105, 100, 10_500, 5, True),
+            KlineEvent(120_000, 179_999, "BTCUSDT", "1m", 105, 110, 104, 109, 120, 12_900, 5, True),
+            KlineEvent(180_000, 239_999, "BTCUSDT", "1m", 109, 113, 108, 112, 110, 12_210, 5, True),
+            KlineEvent(240_000, 299_999, "BTCUSDT", "1m", 112, 113, 109.3, 110, 95, 10_450, 5, True),
+        ]
+
+        self.assertIsNone(
+            kline_momentum_stop_price(
+                SignalSide.LONG,
+                opened_at=30_000,
+                current_stop_price=95,
+                current_price=111,
+                closed_klines=bars,
+                consecutive_bars=3,
+                reference_bars=2,
+            )
+        )
+
+    def test_kline_momentum_short_uses_supported_bullish_pullback_after_three_bear_bars(self):
+        bars = [
+            KlineEvent(60_000, 119_999, "BTCUSDT", "1m", 110, 112, 104, 105, 100, 10_500, 5, True),
+            KlineEvent(120_000, 179_999, "BTCUSDT", "1m", 105, 106, 100, 101, 120, 12_120, 5, True),
+            KlineEvent(180_000, 239_999, "BTCUSDT", "1m", 101, 102, 96, 98, 110, 10_890, 5, True),
+            KlineEvent(240_000, 299_999, "BTCUSDT", "1m", 98, 104, 97, 100, 95, 9_500, 5, True),
+        ]
+
+        self.assertEqual(
+            kline_momentum_stop_price(
+                SignalSide.SHORT,
+                opened_at=30_000,
+                current_stop_price=115,
+                current_price=99,
+                closed_klines=bars,
+                consecutive_bars=3,
+                reference_bars=2,
+            ),
+            112,
         )
 
     def test_orderflow_and_absorption_rules_share_the_same_move_math(self):

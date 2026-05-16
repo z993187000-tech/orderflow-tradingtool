@@ -97,7 +97,7 @@ def build_orderflow_view(data_path: Path | str, symbol: str = "BTCUSDT") -> dict
             "trade_count": len(trades),
             "last_price": last_price,
             "cumulative_delta": cumulative_delta,
-            "atr_1m_14": _current_atr(atr_1m.latest_atr, last_price or 0, bin_size),
+            "atr_1m_14": _current_atr(atr_1m.latest_atr, atr_3m.latest_atr, last_price or 0, bin_size),
             "atr_3m_14": atr_3m.latest_atr,
             "last_aggression_bubble": to_jsonable(last_bubble),
             "last_break_even_shift": last_action(paper_actions, "break_even_shift"),
@@ -128,9 +128,10 @@ def build_orderflow_view(data_path: Path | str, symbol: str = "BTCUSDT") -> dict
     }
 
 
-def _current_atr(latest_atr: float, fallback_price: float, bin_size: float) -> float:
-    if latest_atr > 0:
-        return latest_atr
+def _current_atr(atr_1m: float, atr_3m: float, fallback_price: float, bin_size: float) -> float:
+    atr = max(atr_1m, atr_3m)
+    if atr > 0:
+        return atr
     return max(fallback_price * 0.002, bin_size / 2)
 
 

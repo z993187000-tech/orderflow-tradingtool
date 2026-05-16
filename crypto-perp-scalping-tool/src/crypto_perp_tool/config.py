@@ -10,8 +10,6 @@ from crypto_perp_tool.serialization import to_jsonable
 @dataclass(frozen=True)
 class RiskSettings:
     risk_per_trade: float = 0.0025
-    daily_loss_limit: float = 0.01
-    max_consecutive_losses: int = 3
     max_leverage: int = 3
     max_symbol_notional_equity_multiple: float = 2.0
 
@@ -88,7 +86,7 @@ class MarketStateSettings:
 @dataclass(frozen=True)
 class ConfirmationSettings:
     require_1m_close: bool = True
-    close_buffer_bps: float = 1.0
+    close_buffer_bps: float = 0.36
     max_reclaim_seconds: int = 20
     min_displacement_atr: float = 0.15
     min_delta_ratio: float = 1.2
@@ -109,9 +107,9 @@ class ManagementSettings:
     squeeze_break_even_r: float = 1.25
     failed_auction_break_even_r: float = 1.5
     lvn_acceptance_break_even_r: float = 1.5
-    first_structure_reduce_ratio: float = 0.5
+    first_structure_reduce_ratio: float = 0.0
     absorption_reduce_ratio: float = 0.5
-    no_followthrough_seconds: int = 45
+    no_followthrough_seconds: int = 0
 
 
 @dataclass(frozen=True)

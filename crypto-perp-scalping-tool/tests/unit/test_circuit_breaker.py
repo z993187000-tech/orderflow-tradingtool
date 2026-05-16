@@ -12,9 +12,9 @@ class CircuitBreakerTests(unittest.TestCase):
 
     def test_trip_sets_state_and_reason(self):
         cb = CircuitBreaker()
-        cb.trip(CircuitBreakerReason.DAILY_LOSS_LIMIT)
+        cb.trip(CircuitBreakerReason.WEBSOCKET_STALE)
         self.assertEqual(cb.state, "tripped")
-        self.assertEqual(cb.reason, CircuitBreakerReason.DAILY_LOSS_LIMIT)
+        self.assertEqual(cb.reason, CircuitBreakerReason.WEBSOCKET_STALE)
         self.assertIsNotNone(cb.tripped_at)
 
     def test_can_resume_true_when_all_conditions_met(self):
@@ -24,7 +24,6 @@ class CircuitBreakerTests(unittest.TestCase):
             account_ok=True,
             data_healthy=True,
             positions_reconciled=True,
-            daily_loss_within_limit=True,
         )
         self.assertTrue(ok)
 
@@ -35,18 +34,6 @@ class CircuitBreakerTests(unittest.TestCase):
             account_ok=True,
             data_healthy=True,
             positions_reconciled=False,
-            daily_loss_within_limit=True,
-        )
-        self.assertFalse(ok)
-
-    def test_can_resume_false_when_daily_loss_exceeded(self):
-        cb = CircuitBreaker()
-        cb.trip(CircuitBreakerReason.DAILY_LOSS_LIMIT)
-        ok = cb.can_resume(
-            account_ok=True,
-            data_healthy=True,
-            positions_reconciled=True,
-            daily_loss_within_limit=False,
         )
         self.assertFalse(ok)
 

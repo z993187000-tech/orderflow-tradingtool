@@ -71,7 +71,7 @@ class TelegramCommandHandler:
         parts = text.strip().split()
         if len(parts) < 3:
             return ("usage: /set <key> <value>\n"
-                    "risk keys: risk_per_trade, daily_loss_limit, max_consecutive_losses, max_leverage, max_symbol_notional\n"
+                    "risk keys: risk_per_trade, max_leverage, max_symbol_notional\n"
                     "store keys: equity, cooldown_ms, flash_atr_mult, flash_pct\n"
                     "strategy keys: reward_risk, dynamic_reward_risk_enabled, reward_risk_min, reward_risk_max, "
                     "atr_stop_mult, min_stop_cost_mult, min_target_cost_mult, max_holding_min")
@@ -83,8 +83,6 @@ class TelegramCommandHandler:
         risk = self.service.risk()
         lines = ["Risk settings:"]
         lines.append(f"  risk_per_trade={risk.get('risk_per_trade','?')}")
-        lines.append(f"  daily_loss_limit={risk.get('daily_loss_limit','?')}")
-        lines.append(f"  max_consecutive_losses={risk.get('max_consecutive_losses','?')}")
         lines.append(f"  max_leverage={risk.get('max_leverage','?')}")
         lines.append(f"  max_symbol_notional={risk.get('max_symbol_notional_equity_multiple','?')}")
         if self._store is not None:

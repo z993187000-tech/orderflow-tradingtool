@@ -24,7 +24,7 @@ class BinanceInstrumentSpec:
     symbol: str
     tick_size: float
     step_size: float
-    taker_fee_rate: float = 0.0004
+    taker_fee_rate: float = 0.00018
 
 
 @dataclass(frozen=True)

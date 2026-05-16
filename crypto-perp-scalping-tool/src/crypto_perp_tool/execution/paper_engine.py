@@ -23,8 +23,8 @@ from crypto_perp_tool.execution.position_rules import (
     break_even_stop_price,
     estimated_round_trip_cost,
     kline_momentum_stop_price,
+    max_holding_reduced_target_price,
     price_moves,
-    should_close_for_orderflow_invalidation,
     triggered_close,
 )
 from crypto_perp_tool.journal import JsonlJournal
@@ -53,7 +53,7 @@ class PaperTradingEngine:
         signal_cooldown_ms: int = 60_000,
         journal_path: Path | str | None = None,
         execution_config: PaperExecutionConfig | None = None,
-        taker_fee_rate: float = 0.0004,
+        taker_fee_rate: float = 0.00018,
     ) -> None:
         self.symbol = symbol.upper()
         self.initial_equity = equity
@@ -91,7 +91,6 @@ class PaperTradingEngine:
         self._last_signal_at: int | None = None
         self._last_close_at: int | None = None
         self._realized_pnl = 0.0
-        self._consecutive_losses = 0
         self._details = self._empty_details()
         self._markers: list[dict[str, Any]] = []
         self._last_event_time = 0
@@ -298,8 +297,9 @@ class PaperTradingEngine:
         return sum(event.price * event.quantity for event in events) / quantity
 
     def _current_atr(self, fallback_price: float) -> float:
-        if self._atr_1m.latest_atr > 0:
-            return self._atr_1m.latest_atr
+        atr = max(self._atr_1m.latest_atr, self._atr_3m.latest_atr)
+        if atr > 0:
+            return atr
         return max(fallback_price * 0.002, self.bin_size / 2)
 
     def _update_trade_1m_kline(self, event: TradeEvent) -> None:
@@ -474,8 +474,6 @@ class PaperTradingEngine:
     def _account_state(self) -> AccountState:
         return AccountState(
             equity=self.initial_equity + self._realized_pnl,
-            realized_pnl_today=self._details["paper"]["pnl_by_range"]["24h"],
-            consecutive_losses=self._consecutive_losses,
         )
 
     def _record_signal(self, signal: TradeSignal) -> None:
@@ -674,9 +672,8 @@ class PaperTradingEngine:
         self._shift_stop_to_break_even(event)
         self._shift_stop_after_kline_momentum(event)
         self._reduce_for_absorption(event)
-        if self._close_for_no_followthrough(event):
-            return True
-        return self._close_for_orderflow_invalidation(event)
+        self._reduce_target_after_max_holding(event)
+        return False
 
     def _update_max_moves(self, price: float) -> None:
         if self._position is None:
@@ -685,24 +682,6 @@ class PaperTradingEngine:
         favorable, adverse = price_moves(position.side, position.entry_price, price)
         position.max_favorable_move = max(position.max_favorable_move, favorable)
         position.max_adverse_move = max(position.max_adverse_move, adverse)
-
-    def _close_for_orderflow_invalidation(self, event: TradeEvent) -> bool:
-        if self._position is None:
-            return False
-        position = self._position
-        mean_abs_delta = abs(sum(self._rolling_delta[-30:]) / max(len(self._rolling_delta[-30:]), 1)) if self._rolling_delta else 0
-        baseline = max(mean_abs_delta * 2.0, 10.0)
-        if not should_close_for_orderflow_invalidation(
-            position.side,
-            delta_30s=self._last_delta_30s,
-            baseline=baseline,
-            entry_price=position.entry_price,
-            initial_stop_price=position.initial_stop_price,
-            current_price=event.price,
-        ):
-            return False
-        self._close_position(event.timestamp, event.price, "orderflow_invalidation")
-        return True
 
     def _shift_stop_to_break_even(self, event: TradeEvent) -> None:
         if self._position is None or self._position.break_even_shifted:
@@ -732,25 +711,6 @@ class PaperTradingEngine:
         if profile in {"lvn_acceptance"}:
             return self.execution_config.lvn_acceptance_break_even_r
         return position.target_r_multiple / 2.0
-
-    def _close_for_no_followthrough(self, event: TradeEvent) -> bool:
-        if self._position is None:
-            return False
-        position = self._position
-        profile = position.management_profile or position.setup_model
-        if profile not in {"squeeze", "squeeze_continuation"}:
-            return False
-        elapsed = event.timestamp - position.opened_at
-        if elapsed < self.execution_config.no_followthrough_seconds * 1000:
-            return False
-        risk = abs(position.entry_price - position.initial_stop_price)
-        if risk <= 0:
-            return False
-        favorable, _ = price_moves(position.side, position.entry_price, event.price)
-        if favorable > risk * 0.25:
-            return False
-        self._close_position(event.timestamp, event.price, "no_followthrough")
-        return True
 
     def _shift_stop_after_kline_momentum(self, event: TradeEvent) -> None:
         if self._position is None:
@@ -845,6 +805,36 @@ class PaperTradingEngine:
             {"signal_id": position.signal_id, "quantity": reduce_quantity, "remaining_quantity": position.quantity},
         )
 
+    def _reduce_target_after_max_holding(self, event: TradeEvent) -> None:
+        if self._position is None:
+            return
+        position = self._position
+        target_price, target_r_multiple, reductions = max_holding_reduced_target_price(
+            position.side,
+            entry_price=position.entry_price,
+            initial_stop_price=position.initial_stop_price,
+            current_target_r_multiple=position.target_r_multiple,
+            elapsed_ms=event.timestamp - position.opened_at,
+            max_holding_ms=self.execution_config.max_holding_ms,
+            completed_reductions=position.max_holding_target_reductions,
+            round_trip_cost=estimated_round_trip_cost(position.entry_price, self.taker_fee_rate),
+        )
+        position.max_holding_target_reductions = reductions
+        if target_price is None or target_r_multiple is None:
+            return
+        position.target_price = target_price
+        position.target_r_multiple = target_r_multiple
+        self._record_protective_action(
+            "max_holding_target_reduce",
+            event.timestamp,
+            {
+                "signal_id": position.signal_id,
+                "target_price": target_price,
+                "target_r_multiple": target_r_multiple,
+                "reductions": reductions,
+            },
+        )
+
     def _close_position_if_triggered(self, event: TradeEvent) -> None:
         if self._position is None:
             return
@@ -875,7 +865,6 @@ class PaperTradingEngine:
         exit_fee = abs(fill_price * position.quantity) * self.taker_fee_rate
         net_pnl = gross_pnl - position.entry_fee - exit_fee
         self._realized_pnl += net_pnl
-        self._consecutive_losses = self._consecutive_losses + 1 if net_pnl < 0 else 0
         entry_notional = position.entry_price * position.quantity
         pnl_percent = (net_pnl / entry_notional * 100) if entry_notional else 0.0
         closed = {
@@ -1258,7 +1247,6 @@ class PaperTradingEngine:
         }
         self._last_event_time = max(self._last_event_time, timestamp)
         self._realized_pnl += realized_pnl
-        self._consecutive_losses = self._consecutive_losses + 1 if realized_pnl < 0 else 0
         self._details["paper"]["closed_positions"].append(restored_closed)
         self._details["paper"]["pnl_events"].append(
             {

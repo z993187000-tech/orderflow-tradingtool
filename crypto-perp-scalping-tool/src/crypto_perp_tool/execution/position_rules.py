@@ -14,6 +14,7 @@ class KlineLike(Protocol):
     high: float
     low: float
     close: float
+    volume: float
     is_closed: bool
 
 
@@ -23,7 +24,7 @@ def price_moves(side: SignalSide, entry_price: float, price: float) -> tuple[flo
     return entry_price - price, price - entry_price
 
 
-def estimated_round_trip_cost(entry_price: float, taker_fee_rate: float = 0.0004) -> float:
+def estimated_round_trip_cost(entry_price: float, taker_fee_rate: float = 0.00018) -> float:
     """Estimate round-trip cost: 2x taker fee + spread + slippage (~10 bps)."""
     return entry_price * (2.0 * taker_fee_rate + 0.0002)
 
@@ -51,9 +52,40 @@ def triggered_close(
             return stop_price, reason
         if current_price <= target_price:
             return target_price, "target"
-    if timestamp - opened_at >= max_holding_ms:
-        return current_price, "time_stop"
     return None, None
+
+
+def max_holding_reduced_target_price(
+    side: SignalSide,
+    *,
+    entry_price: float,
+    initial_stop_price: float,
+    current_target_r_multiple: float,
+    elapsed_ms: int,
+    max_holding_ms: int,
+    completed_reductions: int,
+    round_trip_cost: float = 0.0,
+) -> tuple[float | None, float | None, int]:
+    if max_holding_ms <= 0 or elapsed_ms < max_holding_ms:
+        return None, None, completed_reductions
+    reduction_count = elapsed_ms // max_holding_ms
+    if reduction_count <= completed_reductions:
+        return None, None, completed_reductions
+    risk = abs(entry_price - initial_stop_price)
+    if risk <= 0 or current_target_r_multiple <= 0:
+        return None, None, completed_reductions
+
+    missing_reductions = reduction_count - completed_reductions
+    break_even_r = max(round_trip_cost / risk, 0.0)
+    target_r_multiple = max(current_target_r_multiple - missing_reductions, break_even_r)
+    if target_r_multiple >= current_target_r_multiple:
+        return None, None, reduction_count
+
+    if side == SignalSide.LONG:
+        target_price = entry_price + risk * target_r_multiple
+    else:
+        target_price = entry_price - risk * target_r_multiple
+    return target_price, target_r_multiple, reduction_count
 
 
 def partial_take_profit_price(
@@ -116,25 +148,72 @@ def kline_momentum_stop_price(
         ),
         key=lambda kline: kline.timestamp,
     )
-    if len(bars) < max(consecutive_bars, reference_bars):
+    if len(bars) < consecutive_bars + 1:
         return None
 
-    momentum_bars = bars[-consecutive_bars:]
-    reference = bars[-reference_bars:]
     if side == SignalSide.LONG:
-        if not all(kline.close > kline.open for kline in momentum_bars):
+        pullback = bars[-1]
+        if not _is_bearish(pullback):
             return None
-        candidate = min(float(kline.low) for kline in reference)
+        momentum_bars = _trailing_run(bars[:-1], bullish=True)
+        if len(momentum_bars) < consecutive_bars:
+            return None
+        if not _has_lower_wick_support(pullback, momentum_bars):
+            return None
+        candidate = float(momentum_bars[0].low)
         if candidate <= current_stop_price or candidate >= current_price:
             return None
         return candidate
 
-    if not all(kline.close < kline.open for kline in momentum_bars):
+    pullback = bars[-1]
+    if not _is_bullish(pullback):
         return None
-    candidate = max(float(kline.high) for kline in reference)
+    momentum_bars = _trailing_run(bars[:-1], bullish=False)
+    if len(momentum_bars) < consecutive_bars:
+        return None
+    if not _has_upper_wick_resistance(pullback, momentum_bars):
+        return None
+    candidate = float(momentum_bars[0].high)
     if candidate >= current_stop_price or candidate <= current_price:
         return None
     return candidate
+
+
+def _is_bullish(kline: KlineLike) -> bool:
+    return float(kline.close) > float(kline.open)
+
+
+def _is_bearish(kline: KlineLike) -> bool:
+    return float(kline.close) < float(kline.open)
+
+
+def _trailing_run(klines: Sequence[KlineLike], *, bullish: bool) -> list[KlineLike]:
+    run: list[KlineLike] = []
+    predicate = _is_bullish if bullish else _is_bearish
+    for kline in reversed(klines):
+        if not predicate(kline):
+            break
+        run.append(kline)
+    return list(reversed(run))
+
+
+def _has_lower_wick_support(pullback: KlineLike, momentum_bars: Sequence[KlineLike]) -> bool:
+    body = abs(float(pullback.open) - float(pullback.close))
+    lower_wick = min(float(pullback.open), float(pullback.close)) - float(pullback.low)
+    return _wick_and_volume_supported(lower_wick, body, pullback, momentum_bars)
+
+
+def _has_upper_wick_resistance(pullback: KlineLike, momentum_bars: Sequence[KlineLike]) -> bool:
+    body = abs(float(pullback.open) - float(pullback.close))
+    upper_wick = float(pullback.high) - max(float(pullback.open), float(pullback.close))
+    return _wick_and_volume_supported(upper_wick, body, pullback, momentum_bars)
+
+
+def _wick_and_volume_supported(wick: float, body: float, pullback: KlineLike, momentum_bars: Sequence[KlineLike]) -> bool:
+    if body <= 0 or wick < body * 0.5:
+        return False
+    avg_volume = sum(float(kline.volume) for kline in momentum_bars) / len(momentum_bars)
+    return avg_volume <= 0 or float(pullback.volume) >= avg_volume * 0.8
 
 
 def trailing_stop_price(

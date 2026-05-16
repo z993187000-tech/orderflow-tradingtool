@@ -95,7 +95,7 @@ class TelegramCommandHandlerTests(unittest.TestCase):
                 return {
                     "summary": {
                         "circuit_state": "tripped",
-                        "circuit_reason": "daily_loss_limit_reached",
+                        "circuit_reason": "websocket_stale",
                         "cooldown_until": 1700000000000,
                     }
                 }
@@ -106,7 +106,7 @@ class TelegramCommandHandlerTests(unittest.TestCase):
             response = handler.handle(chat_id=123, text="/circuit")
 
         self.assertIn("tripped", response)
-        self.assertIn("daily_loss_limit_reached", response)
+        self.assertIn("websocket_stale", response)
 
     def test_circuit_without_store_returns_not_connected(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -143,11 +143,11 @@ class TelegramCommandHandlerTests(unittest.TestCase):
             service.set_store(store)
             handler = TelegramCommandHandler(service, allowed_chat_ids={123}, store=store)
 
-            response = handler.handle(chat_id=123, text="/set daily_loss_limit 0.02")
+            response = handler.handle(chat_id=123, text="/set max_leverage 5")
 
-        self.assertIn("daily_loss_limit = 0.02", response)
+        self.assertIn("max_leverage = 5", response)
         self.assertIsNotNone(store.risk_updated)
-        self.assertEqual(store.risk_updated.daily_loss_limit, 0.02)
+        self.assertEqual(store.risk_updated.max_leverage, 5)
 
     def test_set_updates_equity_on_store(self):
         class FakeLiveStore:
@@ -230,7 +230,7 @@ class TelegramCommandHandlerTests(unittest.TestCase):
             response = handler.handle(chat_id=123, text="/config")
 
         self.assertIn("risk_per_trade", response)
-        self.assertIn("daily_loss_limit", response)
+        self.assertIn("max_leverage", response)
 
     def test_set_updates_circuit_cooldown(self):
         class FakeLiveStore:

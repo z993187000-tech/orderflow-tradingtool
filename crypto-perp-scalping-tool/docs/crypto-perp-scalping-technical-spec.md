@@ -798,7 +798,7 @@ market_state:
   value_acceptance_close_bars: 2
 confirmation:
   require_1m_close: true
-  close_buffer_bps: 1.0
+  close_buffer_bps: 0.36
   max_reclaim_seconds: 20
   min_displacement_atr: 0.15
   min_delta_ratio: 1.2
@@ -813,9 +813,9 @@ management:
   squeeze_break_even_r: 1.25
   failed_auction_break_even_r: 1.5
   lvn_acceptance_break_even_r: 1.5
-  first_structure_reduce_ratio: 0.5
+  first_structure_reduce_ratio: 0.0
   absorption_reduce_ratio: 0.5
-  no_followthrough_seconds: 45
+  no_followthrough_seconds: 0
 ```
 
 ### 18.3 数据结构
